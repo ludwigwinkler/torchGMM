@@ -15,7 +15,7 @@ class FirstDimension(torch.nn.Module):
 
 
 class TimeDependentGMM(torch.nn.Module):
-    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor, weight: torch.Tensor, schedule: BetaSchedule = None):
+    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor, weight: torch.Tensor = None, schedule: BetaSchedule = None):
         super().__init__()
         """
         Args:
@@ -23,22 +23,37 @@ class TimeDependentGMM(torch.nn.Module):
             sigma: [k, d] - standard deviations for k components with d dimensions each  
             weight: [k] - mixture weights for k components
         """
-        assert mu.dim() == 2, f"mu must be a 2D tensor [k, d], got {mu.shape}"
-        assert sigma.dim() == 2, f"sigma must be a 2D tensor [k, d], got {sigma.shape}"
-        assert weight.dim() == 1, f"weight must be a 1D tensor [k], got {weight.shape}"
-        assert (
-            mu.shape[0] == sigma.shape[0] == weight.shape[0]
-        ), f"Number of components must match: mu {mu.shape[0]}, sigma {sigma.shape[0]}, weight {weight.shape[0]}"
+        self.is_conditional = weight is None
 
-        self.register_buffer("mu", mu)
-        self.register_buffer("sigma", sigma)
-        self.mix = Categorical(weight / weight.sum())
+        if not self.is_conditional:
+            # --- Mixture Model Initialization ---
+            assert mu.dim() == 2, f"mu must be a 2D tensor [k, d], got {mu.shape}"
+            assert sigma.dim() == 2, f"sigma must be a 2D tensor [k, d], got {sigma.shape}"
+            assert weight.dim() == 1, f"weight must be a 1D tensor [k], got {weight.shape}"
+            assert (
+                mu.shape[0] == sigma.shape[0] == weight.shape[0]
+            ), f"Number of components must match: mu {mu.shape[0]}, sigma {sigma.shape[0]}, weight {weight.shape[0]}"
+
+            self.register_buffer("mu", mu)
+            self.register_buffer("sigma", sigma)
+            self.mix = Categorical(weight / weight.sum())
+            self.comp = Independent(Normal(mu, sigma), 1)
+            self.gmm = MixtureSameFamily(self.mix, self.comp)
+        else:
+            # --- Conditional Model Initialization ---
+            assert mu.dim() == 2, f"For conditional model, mu must be a 2D tensor [BS, D], got {mu.shape}"
+            assert mu.shape == sigma.shape, f"For conditional model, mu and sigma must have the same shape"
+            assert torch.all(sigma == 0), "For conditional model, sigma must be a tensor of zeros."
+            
+            self.register_buffer("mu", mu)
+            self.register_buffer("sigma", sigma)
+            self.mix = None
+            self.comp = Independent(Normal(mu, sigma), 1)
+            self.gmm = None
+
         self.num_components = mu.shape[0]
         self.dim = mu.shape[1]
 
-        self.comp = Independent(Normal(mu, sigma), 1)
-
-        self.gmm = MixtureSameFamily(self.mix, self.comp)
         self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if not schedule else schedule
         self.schedule.to(mu.device)
 
@@ -75,26 +90,37 @@ class TimeDependentGMM(torch.nn.Module):
             t: [BS] - batch of time values
 
         Returns:
-            MixtureSameFamily distribution for the marginal GMM at time t
+            MixtureSameFamily or Independent(Normal) distribution for the marginal at time t
         """
         assert t.dim() == 1, f"t must be a [BS] tensor, got {t.shape}"
 
         batch_size = t.shape[0]
         alpha_t, sigma_t = self.schedule.get_alpha_t_sigma_t(t)  # [BS]
 
-        # Broadcast: [BS, 1, 1] * [k, d] -> [BS, k, d]
-        mu_t = einops.einsum(alpha_t, self.mu, "b, m ... -> b m ...")  # [BS, k, d]
-        var_t = sigma_t.reshape(-1, 1, 1) ** 2 + (
-            einops.einsum(alpha_t, self.sigma, "b, m ... -> b m ...") ** 2
-        )  # [BS, k, d]
-        std_t = torch.sqrt(var_t)
+        if not self.is_conditional:
+            # --- Mixture Model Logic ---
+            # Broadcast: [BS, 1, 1] * [k, d] -> [BS, k, d]
+            mu_t = einops.einsum(alpha_t, self.mu, "b, m ... -> b m ...")  # [BS, k, d]
+            var_t = sigma_t.reshape(-1, 1, 1) ** 2 + (
+                einops.einsum(alpha_t, self.sigma, "b, m ... -> b m ...") ** 2
+            )  # [BS, k, d]
+            std_t = torch.sqrt(var_t)
 
-        # Create batched MixtureSameFamily distribution
-        mix_probs = self.mix.probs.unsqueeze(0).expand(batch_size, -1).to(t.device)
-        mix = Categorical(mix_probs)  # batch_shape=[BS]
-        component = Independent(Normal(mu_t, std_t), 1)  # batch_shape=[BS, k], event_shape=[d]
+            # Create batched MixtureSameFamily distribution
+            mix_probs = self.mix.probs.unsqueeze(0).expand(batch_size, -1).to(t.device)
+            mix = Categorical(mix_probs)  # batch_shape=[BS]
+            component = Independent(Normal(mu_t, std_t), 1)  # batch_shape=[BS, k], event_shape=[d]
 
-        return MixtureSameFamily(mix, component)
+            return MixtureSameFamily(mix, component)
+        else:
+            # --- Conditional Model Logic ---
+            # self.mu is [BS, D], alpha_t is [BS]
+            mu_t = alpha_t.unsqueeze(-1) * self.mu
+            # self.sigma is zeros, so variance is just sigma_t^2
+            var_t = sigma_t.unsqueeze(-1).pow(2)
+            std_t = torch.sqrt(var_t)
+
+            return Independent(Normal(mu_t, std_t), 1)
 
     def marginal_gmm(self, dim) -> "TimeDependentGMM":
         """
@@ -119,6 +145,8 @@ class TimeDependentGMM(torch.nn.Module):
         Hence, each marginal is itself a 1D Gaussian mixture with the same component
         weights but the corresponding mean and variance from the chosen axis.
         """
+        if self.is_conditional:
+            raise NotImplementedError("marginal_gmm is not applicable to a conditional GMM.")
 
         return TimeDependentGMM(self.mu[:, dim].unsqueeze(-1), self.sigma[:, dim].unsqueeze(-1), self.mix.probs)
 
@@ -126,6 +154,8 @@ class TimeDependentGMM(torch.nn.Module):
         """
         Drop a component from the GMM.
         """
+        if self.is_conditional:
+            raise NotImplementedError("drop_mode is not applicable to a conditional GMM.")
         assert self.mu.shape[0] > 1, "Cannot drop mode from a single component GMM"
 
         def pop(thing_to_pop, component_index):
@@ -231,24 +261,6 @@ class TimeDependentGMM(torch.nn.Module):
 
         return gmm_t.sample()
 
-    def logprob_x_x0(self, x: torch.Tensor, x0: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Compute log probability of x given x0 at time t.
-
-        Args:
-            x: [BS, D] - batch of samples
-            x0: [BS, D] - initial samples
-            t: scalar, [BS], or None - time value(s)
-
-        Returns:
-            log_prob: [BS] - log probabilities
-        """
-        assert x.dim() == 2 and x.shape[1] == self.dim, f"x must be a 2D tensor [BS, D] = [*,{self.dim}], got {x.shape}"
-        assert x0.dim() == 2 and x0.shape[1] == self.dim, f"x0 must be a 2D tensor [BS, D] = [*,{self.dim}], got {x0.shape}"
-
-        # TODO: implement the gmm_x|x0 with a TimeDependentGMM with mean=x0, and sigma=0
-        gmm_x0 = TimeDependentGMM(x0, torch.zeros_like(x0), weights=None)
-
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
@@ -258,25 +270,25 @@ if __name__ == "__main__":
         mu = torch.ones(num_components, 2).uniform_(-3, 3)
         sigma = torch.ones(num_components, 2).uniform_(0.5, 1.2)
         weight = torch.ones(num_components).uniform_(0.3, 1.0)
-        gmm = TimeDependentGMM2(mu, sigma, weight)
+        gmm = TimeDependentGMM(mu, sigma, weight)
         samples = gmm.sample((1_000_000,))
         plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
         plt.grid()
         plt.show()
 
-    from mcmc.metropolis_hasting_nd import batch_mh, batch_langevin
+    # from mcmc.metropolis_hasting_nd import batch_mh, batch_langevin
 
     def sample_fn(x):
         return gmm.energy(x), x
 
     init_samples = torch.randn(500, 2)
-    samples, _, _ = batch_langevin(sample_fn, init_samples, n_steps=5_000, step_size=0.1, burn_in=200)
-    plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
-    plt.grid()
-    plt.show()
-
-    init_samples = torch.randn(500, 2)
-    samples, _, _ = batch_mh(sample_fn, init_samples, n_steps=5_000, step_sigma=0.1, burn_in=200)
-    plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
-    plt.grid()
-    plt.show()
+    # samples, _, _ = batch_langevin(sample_fn, init_samples, n_steps=5_000, step_size=0.1, burn_in=200)
+    # plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
+    # plt.grid()
+    # plt.show()
+    #
+    # init_samples = torch.randn(500, 2)
+    # samples, _, _ = batch_mh(sample_fn, init_samples, n_steps=5_000, step_sigma=0.1, burn_in=200)
+    # plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
+    # plt.grid()
+    # plt.show()
