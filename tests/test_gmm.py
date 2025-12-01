@@ -12,8 +12,8 @@ from torchGMM.diffusion import (
     reverse_diffusion,
     reverse_diffusion_with_regular_resampling,
 )
+from torchGMM.gmm import TimeDependentGMM
 from torchGMM.schedule import BetaSchedule
-from torchGMM import TimeDependentGMM
 
 
 @pytest.fixture
@@ -133,7 +133,6 @@ class TestShapes:
         score = gmm.score(x, t=0.5)
         assert score.shape == (50, 2), f"Expected (50, 2), got {score.shape}"
 
-
 class TestTimeProcessing:
     """Test time processing for all valid formats"""
 
@@ -166,7 +165,6 @@ class TestTimeProcessing:
         t = gmm._process_time(t_input, batch_size)
         assert t.shape == (batch_size,)
         assert torch.allclose(t, t_input)
-
 
 class TestGMMProperties:
     """Test mathematical properties of the GMM"""
@@ -202,7 +200,6 @@ class TestGMMProperties:
         grad = torch.autograd.grad(log_p.sum(), x_copy)[0]
 
         torch.testing.assert_close(score, grad, atol=1e-5, rtol=1e-4)
-
 
 class TestMarginalDistributions:
     """Test marginal distribution extraction from TimeDependentGMM"""
@@ -248,7 +245,6 @@ class TestMarginalDistributions:
 
         # Compare pointwise
         torch.testing.assert_close(hist_empirical_1, analytical_probs_1, atol=0.01, rtol=0.1)
-
 
 class TestTemperatureSampling:
     """Test temperature sampling from the GMM"""
@@ -311,3 +307,30 @@ class TestTemperatureSampling:
             torch.testing.assert_close(
                 temperature_prob, tempered_prob, atol=0.01, rtol=0.1, msg=f"Temperature: {temperature}"
             )
+
+class TestConditionalGMM:
+
+    @pytest.mark.parametrize("dim", [1, 3])
+    def test_conditional_log_prob(self, dim):
+        x0 = torch.randn(10, dim)
+        cond_gmm = TimeDependentGMM(x0)
+        x = torch.randn(11, dim)
+
+        log_prob = cond_gmm(x, t=0.0)
+        assert log_prob.shape == (10, 11)
+
+    @pytest.mark.parametrize("dim", [1, 3])
+    def test_conditional_score(self, dim):
+        x0 = torch.randn(10, dim)
+        cond_gmm = TimeDependentGMM(x0)
+        x = torch.randn(11, dim)
+
+        score = cond_gmm.score(x, t=0.0)
+        assert score.shape == (10, 11, dim)
+
+    @pytest.mark.parametrize("dim", [1, 3])
+    def test_conditional_energy(self, dim):
+        x0 = torch.randn(10,dim)
+        cond_gmm = TimeDependentGMM(x0)
+        x = torch.randn(11, dim)
+        energy = cond_gmm.energy(x, t=0.0)

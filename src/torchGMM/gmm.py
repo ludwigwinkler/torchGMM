@@ -2,7 +2,7 @@ from typing import Tuple
 
 import torch
 import einops
-from torch.distributions import Normal, MixtureSameFamily, Independent, Categorical, MultivariateNormal
+from torch.distributions import Normal, MultivariateNormal, MixtureSameFamily, Independent, Categorical, MultivariateNormal
 from torchGMM.schedule import BetaSchedule
 
 LENGTH_SCALE = 5.0
@@ -15,7 +15,7 @@ class FirstDimension(torch.nn.Module):
 
 
 class TimeDependentGMM(torch.nn.Module):
-    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor, weight: torch.Tensor = None, schedule: BetaSchedule = None):
+    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor = None, weight: torch.Tensor = None, schedule: BetaSchedule = None):
         super().__init__()
         """
         Args:
@@ -23,7 +23,7 @@ class TimeDependentGMM(torch.nn.Module):
             sigma: [k, d] - standard deviations for k components with d dimensions each  
             weight: [k] - mixture weights for k components
         """
-        self.is_conditional = weight is None
+        self.is_conditional = weight is None and sigma is None
 
         if not self.is_conditional:
             # --- Mixture Model Initialization ---
@@ -42,13 +42,14 @@ class TimeDependentGMM(torch.nn.Module):
         else:
             # --- Conditional Model Initialization ---
             assert mu.dim() == 2, f"For conditional model, mu must be a 2D tensor [BS, D], got {mu.shape}"
-            assert mu.shape == sigma.shape, f"For conditional model, mu and sigma must have the same shape"
-            assert torch.all(sigma == 0), "For conditional model, sigma must be a tensor of zeros."
-            
+            sigma = torch.zeros_like(mu) + 1e-5
+            # assert mu.shape == sigma.shape, f"For conditional model, mu and sigma must have the same shape"
+            # assert torch.all(sigma == 0), "For conditional model, sigma must be a tensor of zeros."
+
             self.register_buffer("mu", mu)
-            self.register_buffer("sigma", sigma)
+            self.register_buffer("sigma", sigma) # still save sigma, for consistency
             self.mix = None
-            self.comp = Independent(Normal(mu, sigma), 1)
+            self.comp = None
             self.gmm = None
 
         self.num_components = mu.shape[0]
@@ -82,7 +83,7 @@ class TimeDependentGMM(torch.nn.Module):
             # Already [BS]
             return t
 
-    def _get_gmm_t(self, t: torch.Tensor) -> MixtureSameFamily:
+    def _get_gmm_t(self, t: torch.Tensor):
         """
         Get marginal GMM distribution at time t with proper batching support.
 
@@ -114,13 +115,14 @@ class TimeDependentGMM(torch.nn.Module):
             return MixtureSameFamily(mix, component)
         else:
             # --- Conditional Model Logic ---
-            # self.mu is [BS, D], alpha_t is [BS]
-            mu_t = alpha_t.unsqueeze(-1) * self.mu
-            # self.sigma is zeros, so variance is just sigma_t^2
-            var_t = sigma_t.unsqueeze(-1).pow(2)
-            std_t = torch.sqrt(var_t)
+            # self.mu is [C, D], alpha_t is [B] -> mu_t [B, C, D]
+            mu_t = einops.einsum(alpha_t, self.mu, "b, c d -> b c d")
 
-            return Independent(Normal(mu_t, std_t), 1)
+            # self.sigma is small, so variance is mostly sigma_t^2
+            # var_t is [B, C, D]
+            var_t = einops.einsum(sigma_t.pow(2), torch.ones_like(self.mu), "b, c d -> b c d") + einops.einsum(alpha_t, self.sigma, "b, c d -> b c d").pow(2)
+            
+            return MultivariateNormal(loc=mu_t, covariance_matrix=torch.diag_embed(var_t))
 
     def marginal_gmm(self, dim) -> "TimeDependentGMM":
         """
@@ -185,8 +187,14 @@ class TimeDependentGMM(torch.nn.Module):
             log_prob: [BS] - log probabilities
         """
         t = self._process_time(t, x.shape[0])
-        gmm_t = self._get_gmm_t(t)
         assert x.dim() == 2 and x.shape[1] == self.dim, f"x must be a 2D tensor [BS, D] = [*,{self.dim}], got {x.shape}"
+        
+        if self.is_conditional:
+            dist = self._get_gmm_t(t) # MultivariateNormal with batch_shape [B, C]
+            log_prob = dist.log_prob(x.unsqueeze(1))
+            return log_prob.transpose(0, 1) # [C, B]
+
+        gmm_t = self._get_gmm_t(t)
         return gmm_t.log_prob(x)
 
     def log_prob(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
@@ -232,9 +240,21 @@ class TimeDependentGMM(torch.nn.Module):
             x: [BS, D] - batch of samples
             t: scalar, [BS], or None - time value(s)
         """
-        x_copy = x.clone().detach().requires_grad_(True)
-        log_prob = self.__call__(x_copy, t)
-        grad = torch.autograd.grad(log_prob.sum(), x_copy)[0]
+        x.requires_grad_(True)
+
+        if self.is_conditional:
+            t = self._process_time(t, x.shape[0])
+            dist = self._get_gmm_t(t)
+            
+            x_usq = x.unsqueeze(1) # [B, 1, D]
+            
+            precision = torch.linalg.inv(dist.covariance_matrix)
+            score = torch.einsum("bcd,bcde->bce", -(x_usq - dist.loc), precision)
+            
+            return score.transpose(0, 1) # [C, B, D]
+
+        log_prob = self.__call__(x, t)
+        grad = torch.autograd.grad(log_prob.sum(), x)[0]
         return grad
 
     def sample(self, n_samples: int | tuple, t: torch.Tensor | None = None) -> torch.Tensor:
