@@ -2,6 +2,7 @@ import sys
 
 import pytest
 import torch
+import einops
 
 
 from torchGMM.diffusion import (
@@ -42,57 +43,81 @@ class TestShapes:
     def test_gmm_initialization(self):
         """Test GMM can be initialized with various component counts and dimensions"""
         # 2 components, 2D
-        mu = torch.randn(2, 2)
-        sigma = torch.ones(2, 2) * 0.5
-        weight = torch.ones(2)
+        mu = torch.randn(3, 2, 2)
+        sigma = torch.ones(3, 2, 2) * 0.5
+        weight = torch.ones(3, 2)
         gmm = TimeDependentGMM(mu, sigma, weight)
         assert gmm.num_components == 2
         assert gmm.dim == 2
+        assert gmm.batch_size == 3
 
         # 5 components, 3D
-        mu = torch.randn(5, 3)
-        sigma = torch.ones(5, 3) * 0.5
-        weight = torch.ones(5)
+        mu = torch.randn(10, 5, 3)
+        sigma = torch.ones(10, 5, 3) * 0.5
+        weight = torch.ones(10, 5)
         gmm = TimeDependentGMM(mu, sigma, weight)
         assert gmm.num_components == 5
         assert gmm.dim == 3
+        assert gmm.batch_size == 10
 
     def test_sample_shapes_various_inputs(self):
         """Test sample() output shapes with different time inputs"""
-        mu = torch.randn(3, 2)
-        sigma = torch.ones(3, 2) * 0.5
-        weight = torch.ones(3)
+        mu = torch.randn(4, 3, 2)
+        sigma = torch.ones(4, 3, 2) * 0.5
+        weight = torch.ones(4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
         # Integer n_samples, no time
         samples = gmm.sample(100)
-        assert samples.shape == (100, 2), f"Expected (100, 2), got {samples.shape}"
-
-        # Tuple n_samples, no time
-        samples = gmm.sample((50,))
-        assert samples.shape == (50, 2), f"Expected (50, 2), got {samples.shape}"
+        assert samples.shape == (100, 4, 2), f"Expected (100, 4, 2), got {samples.shape}"
 
         # Scalar time (float)
         samples = gmm.sample(100, t=0.5)
-        assert samples.shape == (100, 2), f"Expected (100, 2), got {samples.shape}"
+        assert samples.shape == (100, 4, 2), f"Expected (100, 4, 2), got {samples.shape}"
 
         # Scalar time (tensor)
         samples = gmm.sample(100, t=torch.tensor(0.5))
-        assert samples.shape == (100, 2), f"Expected (100, 2), got {samples.shape}"
+        assert samples.shape == (100, 4, 2), f"Expected (100, 4, 2), got {samples.shape}"
 
         # Batch time [BS]
         samples = gmm.sample(100, t=torch.rand(100))
-        assert samples.shape == (100, 2), f"Expected (100, 2), got {samples.shape}"
+        assert samples.shape == (100, 4, 2), f"Expected (100, 4, 2), got {samples.shape}"
 
         # None time (default t=0)
         samples = gmm.sample(100, t=None)
-        assert samples.shape == (100, 2), f"Expected (100, 2), got {samples.shape}"
+        assert samples.shape == (100, 4, 2), f"Expected (100, 4, 2), got {samples.shape}"
 
-    def test_logprob_shapes(self):
+    def test_time_processing(self):
+        """Test time processing for all valid formats"""
+        mu = torch.randn(4, 3, 2)
+        sigma = torch.ones(4, 3, 2) * 0.5
+        weight = torch.ones(4, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight)
+
+        t = gmm._process_time(0.5, (100, 4))
+        assert t.shape == (100, 4), f"Expected (100, 4), got {t.shape}"
+        assert torch.allclose(t, torch.full((100, 4), 0.5))
+
+        t = gmm._process_time(torch.tensor(0.5), (100, 4))
+        assert t.shape == (100, 4), f"Expected (100, 4), got {t.shape}"
+        assert torch.allclose(t, torch.full((100, 4), 0.5))
+
+        t_input = torch.rand(100)
+        t = gmm._process_time(t_input, (100, 4))
+        assert t.shape == (100, 4), f"Expected (100, 4), got {t.shape}"
+        assert torch.allclose(einops.repeat(t_input, "n -> n b", b=4), t)
+
+        t_input = torch.rand(100, 4)
+        t = gmm._process_time(t_input, (100, 4))
+        assert t.shape == (100, 4), f"Expected (100, 4), got {t.shape}"
+        assert torch.allclose(t_input, t)
+
+    @pytest.mark.parametrize("x_shape", [(50, 2), (50, 4, 2)])
+    def test_logprob_shapes(self, x_shape):
         """Test __call__() (log_prob) output shapes"""
-        mu = torch.randn(3, 2)
-        sigma = torch.ones(3, 2) * 0.5
-        weight = torch.ones(3)
+        mu = torch.randn(4, 3, 2)
+        sigma = torch.ones(4, 3, 2) * 0.5
+        weight = torch.ones(4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
         # [BS, D] input -> [BS] output
@@ -100,38 +125,44 @@ class TestShapes:
 
         # No time
         log_p = gmm(x)
-        assert log_p.shape == (50,), f"Expected (50,), got {log_p.shape}"
+        assert log_p.shape == (50, 4), f"Expected (4, 50), got {log_p.shape}"
 
         # Scalar time
         log_p = gmm(x, t=0.5)
-        assert log_p.shape == (50,), f"Expected (50,), got {log_p.shape}"
+        assert log_p.shape == (50, 4), f"Expected (4, 50), got {log_p.shape}"
 
         # Batch time
         log_p = gmm(x, t=torch.rand(50))
-        assert log_p.shape == (50,), f"Expected (50,), got {log_p.shape}"
+        assert log_p.shape == (50, 4), f"Expected (4, 50), got {log_p.shape}"
 
     def test_energy_shapes(self):
         """Test energy() output shapes"""
-        mu = torch.randn(3, 2)
-        sigma = torch.ones(3, 2) * 0.5
-        weight = torch.ones(3)
+        mu = torch.randn(4, 3, 2)
+        sigma = torch.ones(4, 3, 2) * 0.5
+        weight = torch.ones(4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
-        x = torch.randn(50, 2)
+        x = torch.randn(50, 4, 2)
         energy = gmm.energy(x, t=0.5)
-        assert energy.shape == (50,), f"Expected (50,), got {energy.shape}"
+        assert energy.shape == (50, 4), f"Expected (4, 50), got {energy.shape}"
 
-    def test_score_shapes(self):
+    @pytest.mark.parametrize(
+        "x_t_shape", [((2,), (1,), (1, 4, 2)), ((50, 2), (50,), (50, 4, 2)), ((50, 4, 2), (50, 4), (50, 4, 2))]
+    )
+    def test_score_shapes(self, x_t_shape):
         """Test score() output shapes (gradient)"""
-        mu = torch.randn(3, 2)
-        sigma = torch.ones(3, 2) * 0.5
-        weight = torch.ones(3)
+        x_shape, t_shape, score_shape = x_t_shape
+        mu = torch.randn(4, 3, 2)
+        sigma = torch.ones(4, 3, 2) * 0.5
+        weight = torch.ones(4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
         # [BS, D] input -> [BS, D] gradient output
-        x = torch.randn(50, 2)
-        score = gmm.score(x, t=0.5)
-        assert score.shape == (50, 2), f"Expected (50, 2), got {score.shape}"
+        x = torch.randn(x_shape)
+        t = torch.randn(t_shape)
+        score = gmm.score(x, t=t)
+        assert score.shape == score_shape, f"Expected {score_shape}, got {score.shape}"
+
 
 class TestTimeProcessing:
     """Test time processing for all valid formats"""
@@ -166,14 +197,15 @@ class TestTimeProcessing:
         assert t.shape == (batch_size,)
         assert torch.allclose(t, t_input)
 
+
 class TestGMMProperties:
     """Test mathematical properties of the GMM"""
 
     def test_log_prob_vs_energy(self):
         """Test that energy = -log_prob"""
-        mu = torch.randn(3, 2)
-        sigma = torch.ones(3, 2) * 0.5
-        weight = torch.ones(3)
+        mu = torch.randn(1, 3, 2)
+        sigma = torch.ones(1, 3, 2) * 0.5
+        weight = torch.ones(1, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
         x = torch.randn(50, 2)
@@ -183,13 +215,16 @@ class TestGMMProperties:
         torch.testing.assert_close(energy, -log_p)
 
     def test_score_is_gradient(self):
-        """Test that score equals gradient of log_prob"""
-        mu = torch.randn(2, 2)
-        sigma = torch.ones(2, 2) * 0.5
-        weight = torch.ones(2)
+        """
+        Test that score equals gradient of log_prob
+        x has to be a 3D tensor [BS, N, d], as we're internally broadcasting over all batched GMM's [BS, d] -> [N, BS, d]
+        """
+        mu = torch.randn(4, 3, 2)
+        sigma = torch.ones(4, 3, 2) * 0.5
+        weight = torch.ones(4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
-        x = torch.randn(10, 2)
+        x = torch.randn(10, 4, 2)
 
         # Get score from gmm.score()
         score = gmm.score(x, t=0.5)
@@ -198,8 +233,9 @@ class TestGMMProperties:
         x_copy = x.clone().detach().requires_grad_(True)
         log_p = gmm(x_copy, t=0.5)
         grad = torch.autograd.grad(log_p.sum(), x_copy)[0]
-
+        assert score.shape == grad.shape, f"Expected {score.shape=}, got {grad.shape=}"
         torch.testing.assert_close(score, grad, atol=1e-5, rtol=1e-4)
+
 
 class TestMarginalDistributions:
     """Test marginal distribution extraction from TimeDependentGMM"""
@@ -245,6 +281,7 @@ class TestMarginalDistributions:
 
         # Compare pointwise
         torch.testing.assert_close(hist_empirical_1, analytical_probs_1, atol=0.01, rtol=0.1)
+
 
 class TestTemperatureSampling:
     """Test temperature sampling from the GMM"""
@@ -308,29 +345,39 @@ class TestTemperatureSampling:
                 temperature_prob, tempered_prob, atol=0.01, rtol=0.1, msg=f"Temperature: {temperature}"
             )
 
-class TestConditionalGMM:
 
-    @pytest.mark.parametrize("dim", [1, 3])
-    def test_conditional_log_prob(self, dim):
-        x0 = torch.randn(10, dim)
-        cond_gmm = TimeDependentGMM(x0)
-        x = torch.randn(11, dim)
+# class TestConditionalGMM:
 
-        log_prob = cond_gmm(x, t=0.0)
-        assert log_prob.shape == (10, 11)
+#     @pytest.mark.parametrize("dim", [1, 3])
+#     def test_conditional_log_prob(self, dim):
+#         x0 = torch.randn(10, dim)
+#         cond_gmm = TimeDependentGMM(x0)
+#         x = torch.randn(11, dim)
 
-    @pytest.mark.parametrize("dim", [1, 3])
-    def test_conditional_score(self, dim):
-        x0 = torch.randn(10, dim)
-        cond_gmm = TimeDependentGMM(x0)
-        x = torch.randn(11, dim)
+#         log_prob = cond_gmm(x, t=0.0)
+#         assert log_prob.shape == (10, 11)
 
-        score = cond_gmm.score(x, t=0.0)
-        assert score.shape == (10, 11, dim)
+#     @pytest.mark.parametrize("dim", [1, 3])
+#     def test_conditional_score(self, dim):
+#         x0 = torch.randn(10, dim)
+#         cond_gmm = TimeDependentGMM(x0)
+#         x = torch.randn(11, dim)
 
-    @pytest.mark.parametrize("dim", [1, 3])
-    def test_conditional_energy(self, dim):
-        x0 = torch.randn(10,dim)
-        cond_gmm = TimeDependentGMM(x0)
-        x = torch.randn(11, dim)
-        energy = cond_gmm.energy(x, t=0.0)
+#         score = cond_gmm.score(x, t=0.0)
+#         assert score.shape == (10, 11, dim)
+
+#     @pytest.mark.parametrize('t', [0.0, 0.1, 0.8, 1.0])
+#     @pytest.mark.parametrize("dim", [1, 3])
+#     def test_conditional_energy(self, dim, t):
+#         x0 = torch.randn(10,dim)
+#         cond_gmm = TimeDependentGMM(x0)
+#         x = torch.randn(11, dim)
+#         energy = cond_gmm.energy(x, t=t)
+
+#     @pytest.mark.parametrize('t', [0.0, 0.1, 0.8, 1.0])
+#     @pytest.mark.parametrize("dim", [1, 3])
+#     def test_conditional_energy(self, dim, t):
+#         x0 = torch.randn(10,dim)
+#         cond_gmm = TimeDependentGMM(x0)
+#         x = torch.randn(11, dim)
+#         energy = cond_gmm.energy(x, t=t)

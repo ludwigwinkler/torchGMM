@@ -1,12 +1,16 @@
 import torch
+import einops
 from matplotlib import pyplot as plt
 
 from torchGMM import TimeDependentGMM
 from torchGMM.diffusion import forward_diffusion, reverse_diffusion, denoising
 
-mu = torch.tensor([-2, 0, 1]).reshape(-1, 1)
-std = torch.tensor([0.25, 0.25, 0.25]).reshape(-1, 1)
-weight = torch.tensor([0.5, 0.3, 0.3])
+BS = 3
+k = 3
+d = 1
+mu = torch.stack([torch.tensor([-2, 0, 1]).reshape(3, 1) + torch.randn(3,1) for _ in range(BS)])
+std = torch.stack([torch.tensor([0.25, 0.25, 0.25]).reshape(-1, 1) + torch.rand(3,1) for _ in range(BS)])
+weight = torch.stack([torch.tensor([0.5, 0.3, 0.3]) for _ in range(BS)])
 
 gmm = TimeDependentGMM(mu, std, weight)
 
@@ -14,7 +18,8 @@ gmm = TimeDependentGMM(mu, std, weight)
 samples = gmm.sample(10_000)
 
 x = torch.linspace(-5, 5, 1000)
-prob = gmm.log_prob(x.reshape(-1, 1)).exp()
+x_ = einops.repeat(x, 'N -> B N 1', B=BS)
+prob = gmm.log_prob(x_).exp()
 plt.hist(samples, bins=50, density=True)
 plt.plot(x, prob)
 plt.show()

@@ -1,8 +1,7 @@
-from typing import Tuple
-
 import torch
 import einops
-from torch.distributions import Normal, MultivariateNormal, MixtureSameFamily, Independent, Categorical, MultivariateNormal
+import numbers
+from torch.distributions import Independent,MultivariateNormal, Normal, MixtureSameFamily, Categorical
 from torchGMM.schedule import BetaSchedule
 
 LENGTH_SCALE = 5.0
@@ -15,72 +14,81 @@ class FirstDimension(torch.nn.Module):
 
 
 class TimeDependentGMM(torch.nn.Module):
-    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor = None, weight: torch.Tensor = None, schedule: BetaSchedule = None):
+    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor, weight: torch.Tensor, schedule: BetaSchedule = None):
         super().__init__()
         """
         Args:
-            mu: [k, d] - means for k components with d dimensions each
-            sigma: [k, d] - standard deviations for k components with d dimensions each  
-            weight: [k] - mixture weights for k components
+            mu: [BS, k, d] - means for BS batched GMMs, each with k components and d dimensions
+            sigma: [BS, k, d] - standard deviations for BS batched GMMs, each with k components and d dimensions  
+            weight: [BS, k] - mixture weights for BS batched GMMs, each with k components
         """
-        self.is_conditional = weight is None and sigma is None
+        assert mu.dim() == 3, f"mu must be a 3D tensor [BS, k, d], got {mu.shape}"
+        assert sigma.dim() == 3, f"sigma must be a 3D tensor [BS, k, d], got {sigma.shape}"
+        assert weight.dim() == 2, f"weight must be a 2D tensor [BS, k], got {weight.shape}"
+        assert (
+            mu.shape[0] == sigma.shape[0] == weight.shape[0]
+        ), f"Batch size must match: mu {mu.shape[0]}, sigma {sigma.shape[0]}, weight {weight.shape[0]}"
+        assert (
+            mu.shape[1] == sigma.shape[1] == weight.shape[1]
+        ), f"Number of components must match: mu {mu.shape[1]}, sigma {sigma.shape[1]}, weight {weight.shape[1]}"
+        assert (
+            mu.shape[2] == sigma.shape[2]
+        ), f"Dimension must match: mu {mu.shape[2]}, sigma {sigma.shape[2]}"
 
-        if not self.is_conditional:
-            # --- Mixture Model Initialization ---
-            assert mu.dim() == 2, f"mu must be a 2D tensor [k, d], got {mu.shape}"
-            assert sigma.dim() == 2, f"sigma must be a 2D tensor [k, d], got {sigma.shape}"
-            assert weight.dim() == 1, f"weight must be a 1D tensor [k], got {weight.shape}"
-            assert (
-                mu.shape[0] == sigma.shape[0] == weight.shape[0]
-            ), f"Number of components must match: mu {mu.shape[0]}, sigma {sigma.shape[0]}, weight {weight.shape[0]}"
+        self.register_buffer("mu", mu)
+        self.register_buffer("sigma", sigma)
+        
+        # Normalize weights per GMM: [BS, k] -> [BS, k]
+        weight_normalized = weight / weight.sum(dim=1, keepdim=True)  # [BS, k]
+        
+        # Create batched Categorical distributions: batch_shape=[BS], event_shape=[]
+        self.mix = Categorical(weight_normalized)
+        
+        # Create batched MultivariateNormal components
+        # sigma: [BS, k, d] -> covar: [BS, k, d, d]
+        covar = torch.diag_embed(sigma.pow(2))  # [BS, k, d, d]
+        self.comp = MultivariateNormal(mu, covar)  # batch_shape=[BS, k], event_shape=[d]
+        
+        # Create batched MixtureSameFamily: batch_shape=[BS], event_shape=[d]
+        self.gmm = MixtureSameFamily(self.mix, self.comp)
 
-            self.register_buffer("mu", mu)
-            self.register_buffer("sigma", sigma)
-            self.mix = Categorical(weight / weight.sum())
-            self.comp = Independent(Normal(mu, sigma), 1)
-            self.gmm = MixtureSameFamily(self.mix, self.comp)
-        else:
-            # --- Conditional Model Initialization ---
-            assert mu.dim() == 2, f"For conditional model, mu must be a 2D tensor [BS, D], got {mu.shape}"
-            sigma = torch.zeros_like(mu) + 1e-5
-            # assert mu.shape == sigma.shape, f"For conditional model, mu and sigma must have the same shape"
-            # assert torch.all(sigma == 0), "For conditional model, sigma must be a tensor of zeros."
-
-            self.register_buffer("mu", mu)
-            self.register_buffer("sigma", sigma) # still save sigma, for consistency
-            self.mix = None
-            self.comp = None
-            self.gmm = None
-
-        self.num_components = mu.shape[0]
-        self.dim = mu.shape[1]
+        self.batch_size = mu.shape[0]
+        self.BS = mu.shape[0]
+        self.num_components = mu.shape[1]
+        self.dim = mu.shape[2]
 
         self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if not schedule else schedule
         self.schedule.to(mu.device)
 
-    def _process_time(self, t: torch.Tensor | None, batch_size: int) -> torch.Tensor:
+    def _process_time(self, t: torch.Tensor | numbers.Number | None, batch_size: tuple) -> torch.Tensor:
         """
-        Process time input to ensure it's in the correct format [BS].
+        Process time input to ensure it's in the correct format [BS_gmm].
 
         Args:
-            t: scalar, [BS], or None - time value(s)
-            batch_size: number of samples in batch
+            t: scalar, [BS_gmm], or None - time value(s) for each GMM in batch
+            batch_size: GMM batch size (BS_gmm)
 
         Returns:
-            t: [BS] - processed time tensor
+            t: [BS_gmm] - processed time tensor
         """
+        assert type(batch_size) in [tuple, torch.Size], f"batch_size must be a tuple, got {type(batch_size)}"
         if t is None:
-            # Default to t=0
-            return torch.zeros((batch_size,), device=self.mu.device)
+            # Default to t=0 for all GMMs in batch
+            return torch.zeros(batch_size, device=self.mu.device)
         elif not isinstance(t, torch.Tensor):
             # Convert float/int to tensor scalar
             t = torch.tensor(t, device=self.mu.device)
 
         if t.dim() == 0:
-            # Scalar -> expand to batch
-            return t.unsqueeze(0).expand(batch_size)
+            # Scalar -> expand to GMM batch size
+            return einops.repeat(t, "-> n b", n=batch_size[0], b=batch_size[1])
+        elif t.dim() == 1:
+            # [N] -> [N, BS]
+            return einops.repeat(t, "n -> n b", b=batch_size[1])
         else:
-            # Already [BS]
+            # Already [N, BS]
+            assert t.shape[0] == batch_size[0], f"Time batch size {t.shape[0]} must match GMM batch size {batch_size[0]}"
+            assert t.shape[1] == batch_size[1], f"Time batch size {t.shape[1]} must match GMM batch size {batch_size[1]}"
             return t
 
     def _get_gmm_t(self, t: torch.Tensor):
@@ -88,51 +96,55 @@ class TimeDependentGMM(torch.nn.Module):
         Get marginal GMM distribution at time t with proper batching support.
 
         Args:
-            t: [BS] - batch of time values
+            t: [BS_gmm] - batch of time values for each GMM
 
         Returns:
-            MixtureSameFamily or Independent(Normal) distribution for the marginal at time t
+            MixtureSameFamily distribution for the marginal at time t with batch_shape=[BS_gmm], event_shape=[d]
         """
-        assert t.dim() == 1, f"t must be a [BS] tensor, got {t.shape}"
+        assert t.dim() == 2, f"t must be a [BS_gmm, N] tensor, got {t.shape}"
+        assert t.shape[1] == self.batch_size, f"Time batch size {t.shape[0]} must match GMM batch size {self.batch_size}"
 
-        batch_size = t.shape[0]
-        alpha_t, sigma_t = self.schedule.get_alpha_t_sigma_t(t)  # [BS]
+        alpha_t, sigma_t = self.schedule.get_alpha_t_sigma_t(t)  # [BS_gmm, N]
+        assert alpha_t.shape == sigma_t.shape == t.shape, f"alpha_t shape {alpha_t.shape} must match sigma_t shape {sigma_t.shape} and t shape {t.shape}"
 
-        if not self.is_conditional:
-            # --- Mixture Model Logic ---
-            # Broadcast: [BS, 1, 1] * [k, d] -> [BS, k, d]
-            mu_t = einops.einsum(alpha_t, self.mu, "b, m ... -> b m ...")  # [BS, k, d]
-            var_t = sigma_t.reshape(-1, 1, 1) ** 2 + (
-                einops.einsum(alpha_t, self.sigma, "b, m ... -> b m ...") ** 2
-            )  # [BS, k, d]
-            std_t = torch.sqrt(var_t)
+        # Compute time-dependent parameters
+        # alpha_t: [BS_gmm], self.mu: [BS_gmm, k, d] -> mu_t: [BS_gmm, k, d]
+        # Element-wise multiplication: alpha_t[b] * self.mu[b, k, d] for each b
+        # mu_t = alpha_t * self.mu  # [N, BS] x [BS_gmm, k, d] -> [N, BS, k, d]
+        mu_t = einops.einsum(alpha_t, self.mu, "n b, b k d -> n b k d")
+        
+        # var_t: [BS_gmm, k, d]
+        increasing_var_t = einops.repeat(sigma_t ** 2, "n b -> n b k d", k=self.num_components, d=self.dim) # [N, BS, k, d]
+        decreasing_var_t = einops.einsum(alpha_t, self.sigma, "n b, b k d -> n b k d") ** 2 # [N, BS, k, d]
+        # var_t = sigma_t.unsqueeze(-1).unsqueeze(-1) ** 2 + (
+        #     alpha_t.unsqueeze(-1).unsqueeze(-1) * self.sigma
+        # ) ** 2  # [BS_gmm, k, d]
+        var_t = increasing_var_t + decreasing_var_t
+        
+        # Create covariance matrices: [BS_gmm, k, d, d]
+        covar_t = torch.diag_embed(var_t)  # [n, BS_gmm, k, d, d]
 
-            # Create batched MixtureSameFamily distribution
-            mix_probs = self.mix.probs.unsqueeze(0).expand(batch_size, -1).to(t.device)
-            mix = Categorical(mix_probs)  # batch_shape=[BS]
-            component = Independent(Normal(mu_t, std_t), 1)  # batch_shape=[BS, k], event_shape=[d]
+        # Create batched MultivariateNormal components
+        # batch_shape=[BS_gmm, k], event_shape=[d]
+        component = MultivariateNormal(loc=mu_t, covariance_matrix=covar_t)
 
-            return MixtureSameFamily(mix, component)
-        else:
-            # --- Conditional Model Logic ---
-            # self.mu is [C, D], alpha_t is [B] -> mu_t [B, C, D]
-            mu_t = einops.einsum(alpha_t, self.mu, "b, c d -> b c d")
+        # Create batched Categorical mixture
+        batched_probs = einops.repeat(self.mix.probs, "b k -> n b k", n=t.shape[0])
+        mix = Categorical(batched_probs)  # batch_shape=[BS_gmm], event_shape=[]
 
-            # self.sigma is small, so variance is mostly sigma_t^2
-            # var_t is [B, C, D]
-            var_t = einops.einsum(sigma_t.pow(2), torch.ones_like(self.mu), "b, c d -> b c d") + einops.einsum(alpha_t, self.sigma, "b, c d -> b c d").pow(2)
-            
-            return MultivariateNormal(loc=mu_t, covariance_matrix=torch.diag_embed(var_t))
+        # Create batched MixtureSameFamily
+        # batch_shape=[BS_gmm], event_shape=[d]
+        return MixtureSameFamily(mix, component)
 
     def marginal_gmm(self, dim) -> "TimeDependentGMM":
         """
-        Get marginal GMM distribution at time t with proper batching support.
+        Get marginal GMM distribution for batched GMMs.
 
         Args:
             dim: int - dimension to marginalize out
 
         Returns:
-            MixtureSameFamily distribution with a single dimension for the marginal GMM at time t
+            TimeDependentGMM with a single dimension for the marginal GMM
         Notes
         -----
         For a 2D Gaussian mixture with independent coordinates per component,
@@ -147,78 +159,138 @@ class TimeDependentGMM(torch.nn.Module):
         Hence, each marginal is itself a 1D Gaussian mixture with the same component
         weights but the corresponding mean and variance from the chosen axis.
         """
-        if self.is_conditional:
-            raise NotImplementedError("marginal_gmm is not applicable to a conditional GMM.")
-
-        return TimeDependentGMM(self.mu[:, dim].unsqueeze(-1), self.sigma[:, dim].unsqueeze(-1), self.mix.probs)
+        # Extract dimension dim from [BS, k, d] -> [BS, k, 1]
+        mu_marginal = self.mu[:, :, dim:dim+1]  # [BS, k, 1]
+        sigma_marginal = self.sigma[:, :, dim:dim+1]  # [BS, k, 1]
+        
+        return TimeDependentGMM(mu_marginal, sigma_marginal, self.mix.probs, self.schedule)
 
     def drop_mode(self, component_index: int) -> "TimeDependentGMM":
         """
-        Drop a component from the GMM.
+        Drop a component from all GMMs in the batch.
         """
-        if self.is_conditional:
-            raise NotImplementedError("drop_mode is not applicable to a conditional GMM.")
-        assert self.mu.shape[0] > 1, "Cannot drop mode from a single component GMM"
+        assert self.num_components > 1, "Cannot drop mode from a single component GMM"
 
-        def pop(thing_to_pop, component_index):
-            # Remove index component_index from 0th dimension (convert to list for arbitrary shape)
-            items = [x for x in thing_to_pop]
-            items.pop(component_index)
-            return torch.stack(items, dim=0)
+        def _pop_batched(thing_to_pop, component_index):
+            # Remove index component_index from dimension 1 (components) for all batches
+            # thing_to_pop: [BS, k, ...]
+            # Return: [BS, k-1, ...]
+            indices = torch.arange(thing_to_pop.shape[1], device=thing_to_pop.device)
+            mask = indices != component_index
+            return thing_to_pop[:, mask, ...]
 
-        mu_new = pop(self.mu, component_index)
-        sigma_new = pop(self.sigma, component_index)
-        probs_new = pop(self.mix.probs, component_index)
-        probs_new = probs_new / probs_new.sum()  # renormalize
-        return TimeDependentGMM(mu_new, sigma_new, probs_new)
+        mu_new = _pop_batched(self.mu, component_index)  # [BS, k-1, d]
+        sigma_new = _pop_batched(self.sigma, component_index)  # [BS, k-1, d]
+        probs_new = _pop_batched(self.mix.probs, component_index)  # [BS, k-1]
+        
+        # Renormalize weights for each GMM in batch
+        probs_new = probs_new / probs_new.sum(dim=1, keepdim=True)  # [BS, k-1]
+        
+        return TimeDependentGMM(mu_new, sigma_new, probs_new, self.schedule)
 
     def __call__(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
         """
         Compute log probability.
 
         Args:
-            x: [BS, D] - batch of samples
-            t: scalar, [BS], or None - time value(s)
-               - None: assume t=0 for all samples
-               - scalar: same time for all samples
-               - [BS]: time for each sample
+            x: [N, d] or [BS, N, d] - batch of data points
+               - [N, d]: same samples evaluated in each of the [BS] GMMs
+               - [BS, N, d]: each GMM batch evaluates its own samples
+            t: scalar, [N], [BS, N], or None - time value(s)
+               - None: assume t=0 for all
+               - scalar: same time for all (GMM, sample) pairs
+               - [N]: different time per sample, broadcast to all GMMs → [BS, N]
+               - [BS, N]: different time for each (GMM, sample) pair
 
         Returns:
-            log_prob: [BS] - log probabilities
+            log_prob: [BS, N] - log probabilities for each GMM and each data point
         """
-        t = self._process_time(t, x.shape[0])
-        assert x.dim() == 2 and x.shape[1] == self.dim, f"x must be a 2D tensor [BS, D] = [*,{self.dim}], got {x.shape}"
-        
-        if self.is_conditional:
-            dist = self._get_gmm_t(t) # MultivariateNormal with batch_shape [B, C]
-            log_prob = dist.log_prob(x.unsqueeze(1))
-            return log_prob.transpose(0, 1) # [C, B]
+        if x.dim() == 1:
+            assert x.shape[0] == self.dim, f"x must have dimension {self.dim}, got {x.shape[0]}"
+            N = 1
+            x = einops.repeat(x, 'd -> N B d', B=self.batch_size, N=N)
+        elif x.dim() == 2:
+            assert x.shape[1] == self.dim, f"x must have dimension {self.dim}, got {x.shape[1]}"
+            N = x.shape[0]
+            x = einops.repeat(x, 'N d -> N B d', B=self.batch_size)  # [BS, N, d]
+        elif x.dim() == 3:
+            assert x.shape[1] == self.batch_size, f"x batch size {x.shape[0]} must match GMM batch size {self.batch_size}"
+            assert x.shape[2] == self.dim, f"x must have dimension {self.dim}, got {x.shape[2]}"
+            N = x.shape[0]
+            x = x  # [BS, N, d]
 
+        assert x.dim() == 3, f"x must be a 3D tensor [BS, N, d], got {x.shape}"
+        # Process time for GMM batch dimension
+        t = self._process_time(t, x.shape[:2])  # [BS, N]
+        
+        # Get batched GMM distribution: batch_shape=[BS_gmm], event_shape=[d]
         gmm_t = self._get_gmm_t(t)
-        return gmm_t.log_prob(x)
+        
+        # GMM: [BS, k, d]
+        # Data: [BS, N, d]
+        # Transpose N dimension to the first position [N, BS, d]
+        # N is implicit batch dimension, BS is explicit batch dimension
+        assert x.shape[1] == self.batch_size, f"x batch size {x_expanded.shape[0]} must match GMM batch size {self.batch_size}"
+        log_prob = gmm_t.log_prob(x) # [N, BS, d] -> [BS, N]
+        assert log_prob.shape == (N, self.batch_size), f"log_prob shape {log_prob.shape} must match (BS, N) = ({self.batch_size}, {N})"
+        return log_prob  # [BS, N]
 
     def log_prob(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
         """
         Compute log probability.
+
+        Args:
+            x: [N, d] - batch of data points
+            t: scalar, [BS_gmm], or None - time value(s) for each GMM in batch
+
+        Returns:
+            log_prob: [BS_gmm, N] - log probabilities for each GMM and each data point
         """
-        assert x.dim() == 2 and x.shape[1] == self.dim, f"x must be a 2D tensor [BS, D] = [*,{self.dim}], got {x.shape}"
         return self.__call__(x, t)
 
     def cdf(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
         """
         Compute cumulative distribution function.
+        
+        Note: Currently only supports 1D case (d=1).
+
+        Args:
+            x: [N, 1] - batch of data points (only d=1 supported)
+            t: scalar, [BS_gmm], or None - time value(s) for each GMM in batch
+
+        Returns:
+            cdf: [BS_gmm, N] - CDF values for each GMM and each data point
         """
         assert (
             x.dim() == 2 and x.shape[1] == self.dim == 1
-        ), f"x must be a 2D tensor [BS, 1] = [*,{self.dim}] for the moment, got {x.shape}"
+        ), f"x must be a 2D tensor [N, 1] = [*,{self.dim}] for the moment, got {x.shape}"
 
-        t = self._process_time(t, x.shape[0])
-        gmm_t = self._get_gmm_t(t)
-        assert x.dim() == 2 and x.shape[1] == self.dim, f"x must be a 2D tensor [BS, D] = [*,{self.dim}], got {x.shape}"
-        component_cdf = Normal(self.mu.unsqueeze(1), self.sigma.unsqueeze(1)).cdf(x)
-
-        mix_cdf = torch.sum(component_cdf * self.mix.probs, dim=1)
-        mix_cdf = torch.einsum("kbd,k->bd", component_cdf, self.mix.probs)
+        # Process time for GMM batch dimension
+        t = self._process_time(t, self.batch_size)  # [BS_gmm]
+        
+        # Get time-dependent parameters
+        alpha_t, sigma_t = self.schedule.get_alpha_t_sigma_t(t)  # [BS_gmm]
+        mu_t = alpha_t.unsqueeze(-1).unsqueeze(-1) * self.mu  # [BS_gmm, k, 1]
+        var_t = sigma_t.unsqueeze(-1).unsqueeze(-1) ** 2 + (
+            alpha_t.unsqueeze(-1).unsqueeze(-1) * self.sigma
+        ) ** 2  # [BS_gmm, k, 1]
+        std_t = torch.sqrt(var_t)  # [BS_gmm, k, 1]
+        
+        # Expand x to [BS_gmm, N, 1] for broadcasting
+        x_expanded = x.unsqueeze(0).expand(self.batch_size, -1, -1)  # [BS_gmm, N, 1]
+        
+        # Compute component CDFs: [BS_gmm, k, N, 1]
+        # mu_t: [BS_gmm, k, 1], std_t: [BS_gmm, k, 1], x_expanded: [BS_gmm, N, 1]
+        # We need to broadcast: [BS_gmm, k, 1] and [BS_gmm, N, 1] -> [BS_gmm, k, N, 1]
+        mu_t_expanded = mu_t.unsqueeze(2)  # [BS_gmm, k, 1, 1]
+        std_t_expanded = std_t.unsqueeze(2)  # [BS_gmm, k, 1, 1]
+        x_for_cdf = x_expanded.unsqueeze(1)  # [BS_gmm, 1, N, 1]
+        
+        component_cdf = Normal(mu_t_expanded.squeeze(-1), std_t_expanded.squeeze(-1)).cdf(x_for_cdf.squeeze(-1))  # [BS_gmm, k, N]
+        
+        # Mix CDFs: [BS_gmm, k, N] * [BS_gmm, k] -> [BS_gmm, N]
+        mix_cdf = torch.einsum("bkn,bk->bn", component_cdf, self.mix.probs)  # [BS_gmm, N]
+        
         return mix_cdf
 
     def energy(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
@@ -226,10 +298,13 @@ class TimeDependentGMM(torch.nn.Module):
         Compute energy in the form of -log_prob.
 
         Args:
-            x: [BS, D] - batch of samples
-            t: scalar, [BS], or None - time value(s)
+            x: [N, d] - batch of data points
+            t: scalar, [BS_gmm], or None - time value(s) for each GMM in batch
+
+        Returns:
+            energy: [BS_gmm, N] - energy for each GMM and each data point
         """
-        return -self.__call__(x, t)
+        return -self.__call__(x, t)  # [BS_gmm, N]
 
     @torch.enable_grad()
     def score(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
@@ -237,49 +312,81 @@ class TimeDependentGMM(torch.nn.Module):
         Compute score function using autograd: ∇_x log p(x)
 
         Args:
-            x: [BS, D] - batch of samples
-            t: scalar, [BS], or None - time value(s)
+            x: [N, d] or [BS, N, d] - batch of data points
+               - [N, d]: same samples evaluated in each of the [BS] GMMs
+               - [BS, N, d]: each GMM batch evaluates its own samples
+            t: scalar, [N], [BS, N], or None - time value(s)
+               - None: assume t=0 for all
+               - scalar: same time for all (GMM, sample) pairs
+               - [N]: different time per sample, broadcast to all GMMs → [BS, N]
+               - [BS, N]: different time for each (GMM, sample) pair
+
+        Returns:
+            score: [BS, N, d] - score for each GMM and each data point
         """
-        x.requires_grad_(True)
 
-        if self.is_conditional:
-            t = self._process_time(t, x.shape[0])
-            dist = self._get_gmm_t(t)
-            
-            x_usq = x.unsqueeze(1) # [B, 1, D]
-            
-            precision = torch.linalg.inv(dist.covariance_matrix)
-            score = torch.einsum("bcd,bcde->bce", -(x_usq - dist.loc), precision)
-            
-            return score.transpose(0, 1) # [C, B, D]
+        if x.dim() == 1:
+            assert x.shape[0] == self.dim, f"x must have dimension {self.dim}, got {x.shape[0]}"
+            N = 1
+            x = einops.repeat(x, 'd -> N B d', B=self.batch_size, N=N)
+        elif x.dim() == 2:
+            assert x.shape[1] == self.dim, f"x must have dimension {self.dim}, got {x.shape[1]}"
+            N = x.shape[0]
+            x = einops.repeat(x, 'N d -> N B d', B=self.batch_size)  # [BS, N, d]
+        elif x.dim() == 3:
+            assert x.shape[1] == self.batch_size, f"x batch size {x.shape[0]} must match GMM batch size {self.batch_size}"
+            assert x.shape[2] == self.dim, f"x must have dimension {self.dim}, got {x.shape[2]}"
+            N = x.shape[0]
+            x = x  # [BS, N, d]
+        
+        assert x.dim() == 3, f"x must be a 3D tensor [BS, N, d], got {x.shape}"
+        # Process time for GMM batch dimension
+        x = x.requires_grad_(True)
+        t = self._process_time(t, x.shape[:2])  # [BS, N]
 
-        log_prob = self.__call__(x, t)
-        grad = torch.autograd.grad(log_prob.sum(), x)[0]
-        return grad
+        gmm_t = self._get_gmm_t(t)
+        
+        # Evaluate each GMM separately
+        log_prob = gmm_t.log_prob(x)  # [M]
+        score = torch.autograd.grad(log_prob.sum(), x, create_graph=False)[0]  # [M, d]
+        
+        return score  # [BS, N, d]
 
     def sample(self, n_samples: int | tuple, t: torch.Tensor | None = None) -> torch.Tensor:
         """
-        Sample from the GMM at time t.
+        Sample from the batched GMMs at time t.
 
         Args:
-            n_samples: int or tuple - number of samples to generate
-            t: scalar, [BS], or None - time value(s)
+            n_samples: int or tuple - number of samples to generate per GMM in batch
+            t: scalar, [BS_gmm], [n_samples], or None - time value(s)
+               - None: assume t=0 for all GMMs
+               - scalar: same time for all GMMs
+               - [BS_gmm]: time for each GMM
+               - [n_samples]: if n_samples matches, use first value for all GMMs
 
         Returns:
-            samples: [BS, D] - generated samples
+            samples: [BS_gmm, n_samples, d] - generated samples for each GMM in batch
         """
         # Handle both int and tuple inputs for n_samples
         if isinstance(n_samples, int):
-            batch_size = n_samples
-        else:
-            # n_samples is a tuple like (1000,)
-            batch_size = n_samples[0] if len(n_samples) > 0 else 1
-
-        # Process time input and get GMM distribution
-        t = self._process_time(t, batch_size)
+            batch_size= (n_samples, self.batch_size,)
+        elif isinstance(n_samples, tuple):
+            assert len(n_samples) == 2, f"n_samples must be a tuple of length 2, got {len(n_samples)}"
+            assert n_samples[1] == self.batch_size, f"n_samples[1] must be {self.batch_size}, got {n_samples[1]}"
+            batch_size= n_samples
+        
+        t = self._process_time(t, batch_size)  # [BS_gmm]
+        
+        # Get batched GMM distribution: batch_shape=[BS_gmm], event_shape=[d]
         gmm_t = self._get_gmm_t(t)
-
-        return gmm_t.sample()
+        
+        # Sample from each GMM in batch
+        # The distribution has batch_shape=[BS_gmm], so sample() returns [BS_gmm, d]
+        # We need [BS_gmm, n_samples, d], so we sample n_samples times
+        samples = gmm_t.sample()  # [BS_gmm, n_samples, d]
+        
+        
+        return samples
 
 
 if __name__ == "__main__":
@@ -287,12 +394,15 @@ if __name__ == "__main__":
 
     for _ in range(3):
         num_components = 5
-        mu = torch.ones(num_components, 2).uniform_(-3, 3)
-        sigma = torch.ones(num_components, 2).uniform_(0.5, 1.2)
-        weight = torch.ones(num_components).uniform_(0.3, 1.0)
+        # Create batched GMM with BS=1 (single GMM)
+        mu = torch.ones(1, num_components, 2).uniform_(-3, 3)  # [BS=1, k=5, d=2]
+        sigma = torch.ones(1, num_components, 2).uniform_(0.5, 1.2)  # [BS=1, k=5, d=2]
+        weight = torch.ones(1, num_components).uniform_(0.3, 1.0)  # [BS=1, k=5]
         gmm = TimeDependentGMM(mu, sigma, weight)
-        samples = gmm.sample((1_000_000,))
-        plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
+        samples = gmm.sample(1_000_000)  # [BS=1, n_samples=1_000_000, d=2]
+        # Extract samples for plotting: [1_000_000, 2]
+        samples_plot = samples[0]  # [1_000_000, 2]
+        plt.hist2d(samples_plot[:, 0], samples_plot[:, 1], bins=100)
         plt.grid()
         plt.show()
 
