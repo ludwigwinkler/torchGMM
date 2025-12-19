@@ -14,7 +14,7 @@ class FirstDimension(torch.nn.Module):
 
 
 class TimeDependentGMM(torch.nn.Module):
-    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor, weight: torch.Tensor, schedule: BetaSchedule = None):
+    def __init__(self, mu: torch.Tensor, sigma: torch.Tensor=None, weight: torch.Tensor=None, schedule: BetaSchedule = None):
         super().__init__()
         """
         Args:
@@ -22,6 +22,10 @@ class TimeDependentGMM(torch.nn.Module):
             sigma: [BS, k, d] - standard deviations for BS batched GMMs, each with k components and d dimensions  
             weight: [BS, k] - mixture weights for BS batched GMMs, each with k components
         """
+        assert (mu is not None and sigma is not None and weight is not None) or (mu is not None), "Either mu, sigma, and weight must be provided or mu only"
+        if mu is not None and sigma is None and weight is None:
+            sigma = torch.zeros_like(mu) + 1e-10
+            weight = torch.ones((mu.shape[0],1), device=mu.device, dtype=mu.dtype)
         assert mu.dim() == 3, f"mu must be a 3D tensor [BS, k, d], got {mu.shape}"
         assert sigma.dim() == 3, f"sigma must be a 3D tensor [BS, k, d], got {sigma.shape}"
         assert weight.dim() == 2, f"weight must be a 2D tensor [BS, k], got {weight.shape}"
@@ -35,6 +39,7 @@ class TimeDependentGMM(torch.nn.Module):
             mu.shape[2] == sigma.shape[2]
         ), f"Dimension must match: mu {mu.shape[2]}, sigma {sigma.shape[2]}"
 
+        
         self.register_buffer("mu", mu)
         self.register_buffer("sigma", sigma)
         
@@ -59,6 +64,53 @@ class TimeDependentGMM(torch.nn.Module):
 
         self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if not schedule else schedule
         self.schedule.to(mu.device)
+
+    def __call__(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        Compute log probability.
+
+        Args:
+            x: [N, d] or [BS, N, d] - batch of data points
+               - [N, d]: same samples evaluated in each of the [BS] GMMs
+               - [BS, N, d]: each GMM batch evaluates its own samples
+            t: scalar, [N], [BS, N], or None - time value(s)
+               - None: assume t=0 for all
+               - scalar: same time for all (GMM, sample) pairs
+               - [N]: different time per sample, broadcast to all GMMs → [BS, N]
+               - [BS, N]: different time for each (GMM, sample) pair
+
+        Returns:
+            log_prob: [BS, N] - log probabilities for each GMM and each data point
+        """
+        if x.dim() == 1:
+            assert x.shape[0] == self.dim, f"x must have dimension {self.dim}, got {x.shape[0]}"
+            N = 1
+            x = einops.repeat(x, 'd -> N B d', B=self.batch_size, N=N)
+        elif x.dim() == 2:
+            assert x.shape[1] == self.dim, f"x must have dimension {self.dim}, got {x.shape[1]}"
+            N = x.shape[0]
+            x = einops.repeat(x, 'N d -> N B d', B=self.batch_size)  # [BS, N, d]
+        elif x.dim() == 3:
+            assert x.shape[1] == self.batch_size, f"x batch size {x.shape[0]} must match GMM batch size {self.batch_size}"
+            assert x.shape[2] == self.dim, f"x must have dimension {self.dim}, got {x.shape[2]}"
+            N = x.shape[0]
+            x = x  # [BS, N, d]
+
+        assert x.dim() == 3, f"x must be a 3D tensor [BS, N, d], got {x.shape}"
+        # Process time for GMM batch dimension
+        t = self._process_time(t, x.shape[:2])  # [BS, N]
+        
+        # Get batched GMM distribution: batch_shape=[BS_gmm], event_shape=[d]
+        gmm_t = self._get_gmm_t(t)
+        
+        # GMM: [BS, k, d]
+        # Data: [BS, N, d]
+        # Transpose N dimension to the first position [N, BS, d]
+        # N is implicit batch dimension, BS is explicit batch dimension
+        assert x.shape[1] == self.batch_size, f"x batch size {x_expanded.shape[0]} must match GMM batch size {self.batch_size}"
+        log_prob = gmm_t.log_prob(x) # [N, BS, d] -> [BS, N]
+        assert log_prob.shape == (N, self.batch_size), f"log_prob shape {log_prob.shape} must match (BS, N) = ({self.batch_size}, {N})"
+        return log_prob  # [BS, N]
 
     def _process_time(self, t: torch.Tensor | numbers.Number | None, batch_size: tuple) -> torch.Tensor:
         """
@@ -188,52 +240,6 @@ class TimeDependentGMM(torch.nn.Module):
         
         return TimeDependentGMM(mu_new, sigma_new, probs_new, self.schedule)
 
-    def __call__(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Compute log probability.
-
-        Args:
-            x: [N, d] or [BS, N, d] - batch of data points
-               - [N, d]: same samples evaluated in each of the [BS] GMMs
-               - [BS, N, d]: each GMM batch evaluates its own samples
-            t: scalar, [N], [BS, N], or None - time value(s)
-               - None: assume t=0 for all
-               - scalar: same time for all (GMM, sample) pairs
-               - [N]: different time per sample, broadcast to all GMMs → [BS, N]
-               - [BS, N]: different time for each (GMM, sample) pair
-
-        Returns:
-            log_prob: [BS, N] - log probabilities for each GMM and each data point
-        """
-        if x.dim() == 1:
-            assert x.shape[0] == self.dim, f"x must have dimension {self.dim}, got {x.shape[0]}"
-            N = 1
-            x = einops.repeat(x, 'd -> N B d', B=self.batch_size, N=N)
-        elif x.dim() == 2:
-            assert x.shape[1] == self.dim, f"x must have dimension {self.dim}, got {x.shape[1]}"
-            N = x.shape[0]
-            x = einops.repeat(x, 'N d -> N B d', B=self.batch_size)  # [BS, N, d]
-        elif x.dim() == 3:
-            assert x.shape[1] == self.batch_size, f"x batch size {x.shape[0]} must match GMM batch size {self.batch_size}"
-            assert x.shape[2] == self.dim, f"x must have dimension {self.dim}, got {x.shape[2]}"
-            N = x.shape[0]
-            x = x  # [BS, N, d]
-
-        assert x.dim() == 3, f"x must be a 3D tensor [BS, N, d], got {x.shape}"
-        # Process time for GMM batch dimension
-        t = self._process_time(t, x.shape[:2])  # [BS, N]
-        
-        # Get batched GMM distribution: batch_shape=[BS_gmm], event_shape=[d]
-        gmm_t = self._get_gmm_t(t)
-        
-        # GMM: [BS, k, d]
-        # Data: [BS, N, d]
-        # Transpose N dimension to the first position [N, BS, d]
-        # N is implicit batch dimension, BS is explicit batch dimension
-        assert x.shape[1] == self.batch_size, f"x batch size {x_expanded.shape[0]} must match GMM batch size {self.batch_size}"
-        log_prob = gmm_t.log_prob(x) # [N, BS, d] -> [BS, N]
-        assert log_prob.shape == (N, self.batch_size), f"log_prob shape {log_prob.shape} must match (BS, N) = ({self.batch_size}, {N})"
-        return log_prob  # [BS, N]
 
     def log_prob(self, x: torch.Tensor, t: torch.Tensor | None = None) -> torch.Tensor:
         """

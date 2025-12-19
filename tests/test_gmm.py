@@ -159,10 +159,68 @@ class TestShapes:
 
         # [BS, D] input -> [BS, D] gradient output
         x = torch.randn(x_shape)
-        t = torch.randn(t_shape)
+        t = torch.randn(t_shape).clamp(min=0.001, max=0.999)
         score = gmm.score(x, t=t)
         assert score.shape == score_shape, f"Expected {score_shape}, got {score.shape}"
 
+class TestDistribution:
+    """Test distribution properties"""
+
+    @pytest.mark.parametrize("t", [0.0, 0.5, 0.9, 1.0])
+    def test_conditional_vs_gmm(self,t):
+        """Test distribution properties for different times
+        We initialize a conditional process with only mu=x0 and a GMM with mu, sigma, and weight imitating a conditional model.
+        Then we compare the statistics of the sampled forward process at different times t.
+        """
+        mu = torch.randn(4, 1, 2)
+        sigma = torch.zeros(4, 1, 2) + 1e-10
+        weight = torch.ones(4, 1)
+        gmm = TimeDependentGMM(mu, sigma, weight) # GMM with mu and superfluous sigma, weight
+        conditional = TimeDependentGMM(mu) # Conditional GMM with only mu=x0
+        alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(torch.scalar_tensor(t))
+        # Compute the true mean and variance of the forward process [batch=4,component=1,dim=2) -> x0=[batch=4,dim=2]
+        true_mean = alpha_t * mu.squeeze(1)
+        true_std = (sigma_t ** 2 + alpha_t * sigma.squeeze(1) ** 2)**0.5 * torch.ones_like(mu).squeeze(1)
+        # Create Conditional GMM and GMM with the same parameters and sample from them
+        
+        gmm_samples=gmm.sample(1_000_000, t=t)
+        conditional_samples=conditional.sample(500_000, t=t)
+        #Compute moments are compare
+        ground_truth_moments = [true_mean, true_std]
+        gmm_moments = [gmm_samples.mean(dim=0), gmm_samples.std(dim=0)] # [N, B, D] -[mean,std](0)-> [B, D]
+        conditional_moments = [conditional_samples.mean(dim=0), conditional_samples.std(dim=0)]
+        torch.testing.assert_close(ground_truth_moments, gmm_moments, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(gmm_moments, conditional_moments, atol=1e-2, rtol=1e-2)
+    
+    @pytest.mark.parametrize("t", [0.0, 0.5, 0.9, 1.0, torch.rand(50)])
+    def test_conditional_vs_gmm_score(self,t):
+        """Test distribution properties for different times
+        We initialize a conditional process with only mu=x0 and a GMM with mu, sigma, and weight imitating a conditional model.
+        Then we compare the statistics of the sampled forward process at different times t.
+        """
+        mu = torch.randn(4, 1, 2)
+        sigma = torch.zeros(4, 1, 2) + 1e-10
+        weight = torch.ones(4, 1)
+        gmm = TimeDependentGMM(mu, sigma, weight) # GMM with mu and superfluous sigma, weight
+        conditional = TimeDependentGMM(mu) # Conditional GMM with only mu=x0
+        
+        # Compute the true mean and variance of the forward process [batch=4,component=1,dim=2) -> x0=[batch=4,dim=2]
+        if not isinstance(t, torch.Tensor):
+            t = torch.scalar_tensor(t)
+            alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(t)
+            true_mean = alpha_t * mu.squeeze(1)
+            true_std = (sigma_t ** 2 + alpha_t * sigma.squeeze(1) ** 2)**0.5 * torch.ones_like(mu).squeeze(1)
+        else:
+            true_mean = einops.einsum(alpha_t, mu, "n, b k d -> n b k d").squeeze(-2)
+            
+        
+        # Create Conditional GMM and GMM with the same parameters and compute score on them
+        gmm_samples=gmm.sample(50, t=t)
+        true_score = - (gmm_samples - true_mean) / true_std**2
+        gmm_score=gmm.score(gmm_samples, t=t)
+        conditional_score=conditional.score(gmm_samples, t=t)
+        torch.testing.assert_close(true_score, gmm_score, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(gmm_score, conditional_score, atol=1e-2, rtol=1e-2)
 
 class TestTimeProcessing:
     """Test time processing for all valid formats"""
