@@ -163,11 +163,12 @@ class TestShapes:
         score = gmm.score(x, t=t)
         assert score.shape == score_shape, f"Expected {score_shape}, got {score.shape}"
 
+
 class TestDistribution:
     """Test distribution properties"""
 
     @pytest.mark.parametrize("t", [0.0, 0.5, 0.9, 1.0])
-    def test_conditional_vs_gmm(self,t):
+    def test_conditional_vs_gmm(self, t):
         """Test distribution properties for different times
         We initialize a conditional process with only mu=x0 and a GMM with mu, sigma, and weight imitating a conditional model.
         Then we compare the statistics of the sampled forward process at different times t.
@@ -175,25 +176,25 @@ class TestDistribution:
         mu = torch.randn(4, 1, 2)
         sigma = torch.zeros(4, 1, 2) + 1e-10
         weight = torch.ones(4, 1)
-        gmm = TimeDependentGMM(mu, sigma, weight) # GMM with mu and superfluous sigma, weight
-        conditional = TimeDependentGMM(mu) # Conditional GMM with only mu=x0
+        gmm = TimeDependentGMM(mu, sigma, weight)  # GMM with mu and superfluous sigma, weight
+        conditional = TimeDependentGMM(mu)  # Conditional GMM with only mu=x0
         alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(torch.scalar_tensor(t))
         # Compute the true mean and variance of the forward process [batch=4,component=1,dim=2) -> x0=[batch=4,dim=2]
         true_mean = alpha_t * mu.squeeze(1)
-        true_std = (sigma_t ** 2 + alpha_t * sigma.squeeze(1) ** 2)**0.5 * torch.ones_like(mu).squeeze(1)
+        true_std = (sigma_t**2 + alpha_t * sigma.squeeze(1) ** 2) ** 0.5 * torch.ones_like(mu).squeeze(1)
         # Create Conditional GMM and GMM with the same parameters and sample from them
-        
-        gmm_samples=gmm.sample(1_000_000, t=t)
-        conditional_samples=conditional.sample(500_000, t=t)
-        #Compute moments are compare
+
+        gmm_samples = gmm.sample(1_000_000, t=t)
+        conditional_samples = conditional.sample(500_000, t=t)
+        # Compute moments are compare
         ground_truth_moments = [true_mean, true_std]
-        gmm_moments = [gmm_samples.mean(dim=0), gmm_samples.std(dim=0)] # [N, B, D] -[mean,std](0)-> [B, D]
+        gmm_moments = [gmm_samples.mean(dim=0), gmm_samples.std(dim=0)]  # [N, B, D] -[mean,std](0)-> [B, D]
         conditional_moments = [conditional_samples.mean(dim=0), conditional_samples.std(dim=0)]
         torch.testing.assert_close(ground_truth_moments, gmm_moments, atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(gmm_moments, conditional_moments, atol=1e-2, rtol=1e-2)
-    
+
     @pytest.mark.parametrize("t", [0.0, 0.5, 0.9, 1.0, torch.rand(50)])
-    def test_conditional_vs_gmm_score(self,t):
+    def test_conditional_vs_gmm_score(self, t):
         """Test distribution properties for different times
         We initialize a conditional process with only mu=x0 and a GMM with mu, sigma, and weight imitating a conditional model.
         Then we compare the statistics of the sampled forward process at different times t.
@@ -201,58 +202,66 @@ class TestDistribution:
         mu = torch.randn(4, 1, 2)
         sigma = torch.zeros(4, 1, 2) + 1e-10
         weight = torch.ones(4, 1)
-        gmm = TimeDependentGMM(mu, sigma, weight) # GMM with mu and superfluous sigma, weight
-        conditional = TimeDependentGMM(mu) # Conditional GMM with only mu=x0
-        
+        gmm = TimeDependentGMM(mu, sigma, weight)  # GMM with mu and superfluous sigma, weight
+        conditional = TimeDependentGMM(mu)  # Conditional GMM with only mu=x0
+
         # Compute the true mean and variance of the forward process [batch=4,component=1,dim=2) -> x0=[batch=4,dim=2]
         if not isinstance(t, torch.Tensor):
             t = torch.scalar_tensor(t)
             alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(t)
             true_mean = alpha_t * mu.squeeze(1)
-            true_std = (sigma_t ** 2 + alpha_t * sigma.squeeze(1) ** 2)**0.5 * torch.ones_like(mu).squeeze(1)
+            true_std = (sigma_t**2 + alpha_t * sigma.squeeze(1) ** 2) ** 0.5 * torch.ones_like(mu).squeeze(1)
         else:
+            alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(t)
+            # true_std = (sigma_t ** 2 + alpha_t * sigma.squeeze(1) ** 2)**0.5 * torch.ones_like(mu).squeeze(1)
+            decreasing_var_t = einops.einsum(alpha_t, sigma, "n, b k d -> n b k d") ** 2
+            increasing_var_t = einops.repeat(
+                sigma_t**2, "n -> n b k d", b=gmm.batch_size, k=gmm.num_components, d=gmm.dim
+            )
+            var_t = increasing_var_t + decreasing_var_t
+            true_std = (var_t**0.5).squeeze(-2)
             true_mean = einops.einsum(alpha_t, mu, "n, b k d -> n b k d").squeeze(-2)
-            
-        
+
         # Create Conditional GMM and GMM with the same parameters and compute score on them
-        gmm_samples=gmm.sample(50, t=t)
-        true_score = - (gmm_samples - true_mean) / true_std**2
-        gmm_score=gmm.score(gmm_samples, t=t)
-        conditional_score=conditional.score(gmm_samples, t=t)
+        gmm_samples = gmm.sample(50, t=t)
+        true_score = -(gmm_samples - true_mean) / true_std**2
+        gmm_score = gmm.score(gmm_samples, t=t)
+        conditional_score = conditional.score(gmm_samples, t=t)
         torch.testing.assert_close(true_score, gmm_score, atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(gmm_score, conditional_score, atol=1e-2, rtol=1e-2)
+
 
 class TestTimeProcessing:
     """Test time processing for all valid formats"""
 
     def test_time_processing_formats(self):
         """Test that _process_time handles all valid time formats"""
-        mu = torch.randn(2, 2)
-        sigma = torch.ones(2, 2) * 0.5
-        weight = torch.ones(2)
+        mu = torch.randn(1, 2, 2)
+        sigma = torch.ones(1, 2, 2) * 0.5
+        weight = torch.ones(1, 2)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
-        batch_size = 50
+        batch_size = (50, 1)  # Fifty evaluations for one data point: [N, BS]
 
         # None -> zeros
         t = gmm._process_time(None, batch_size)
-        assert t.shape == (batch_size,)
+        assert t.shape == batch_size
         assert torch.allclose(t, torch.zeros(batch_size))
 
         # Float -> broadcast
         t = gmm._process_time(0.5, batch_size)
-        assert t.shape == (batch_size,)
-        assert torch.allclose(t, torch.full((batch_size,), 0.5))
+        assert t.shape == batch_size
+        assert torch.allclose(t, torch.full(batch_size, 0.5))
 
         # Scalar tensor -> broadcast
         t = gmm._process_time(torch.tensor(0.7), batch_size)
-        assert t.shape == (batch_size,)
-        assert torch.allclose(t, torch.full((batch_size,), 0.7))
+        assert t.shape == batch_size
+        assert torch.allclose(t, torch.full(batch_size, 0.7))
 
         # [BS] tensor -> direct use
         t_input = torch.rand(batch_size)
         t = gmm._process_time(t_input, batch_size)
-        assert t.shape == (batch_size,)
+        assert t.shape == batch_size
         assert torch.allclose(t, t_input)
 
 
@@ -301,14 +310,14 @@ class TestMarginalDistributions:
     def test_marginal_2d_empirical_comparison(self):
         """Compare empirical histograms with analytical marginal distributions"""
         # Create 3-component 2D GMM
-        mu = torch.tensor([[1.0, 2.0], [-1.0, 3.0], [0.0, 0.0]])  # [3, 2]
-        sigma = torch.tensor([[0.5, 0.8], [1.0, 0.6], [0.7, 0.9]])  # [3, 2]
-        weight = torch.tensor([0.3, 0.4, 0.3])  # [3]
+        mu = torch.tensor([[2.0, -2.0], [-2.0, 3.0], [0.0, 0.0]]).unsqueeze(0)  # [1, 3, 2]
+        sigma = torch.tensor([[0.5, 0.4], [0.5, 0.5], [0.3, 0.4]]).unsqueeze(0)  # [1, 3, 2]
+        weight = torch.tensor([0.3, 0.4, 0.3]).unsqueeze(0)  # [3]
         gmm_2d = TimeDependentGMM(mu, sigma, weight)
 
         # Sample from the GMM
         n_samples = 100_000
-        samples = gmm_2d.sample((n_samples,), t=0.0)  # [n_samples, 2]
+        samples = gmm_2d.sample(n_samples, t=0.0)  # [n_samples, 2]
 
         # Set up histogram parameters
         x_min, x_max = -5.0, 5.0
@@ -318,27 +327,27 @@ class TestMarginalDistributions:
         bin_width = (x_max - x_min) / n_bins
 
         # Test dimension 0
-        empirical_0 = samples[:, 0]  # [n_samples]
+        empirical_0 = samples[:, :, 0]  # [n_samples, BS]
         hist_empirical_0, _ = torch.histogram(empirical_0, bins=bin_edges, density=True)  # [n_bins]
 
         marginal_0 = gmm_2d.marginal_gmm(dim=0)
         bin_centers_reshaped = bin_centers.unsqueeze(-1)  # [n_bins, 1]
-        log_probs_0 = marginal_0.log_prob(bin_centers_reshaped)  # [n_bins]
-        analytical_probs_0 = torch.exp(log_probs_0)  # [n_bins]
+        log_probs_0 = marginal_0.log_prob(bin_centers_reshaped)  # [n_bins, BS]
+        analytical_probs_0 = torch.exp(log_probs_0)  # [n_bins, BS]
 
         # Compare pointwise
-        torch.testing.assert_close(hist_empirical_0, analytical_probs_0, atol=0.01, rtol=0.1)
+        torch.testing.assert_close(hist_empirical_0, analytical_probs_0[:, 0], atol=0.01, rtol=0.1)
 
         # Test dimension 1
-        empirical_1 = samples[:, 1]  # [n_samples]
+        empirical_1 = samples[:, :, 1]  # [n_samples, BS]
         hist_empirical_1, _ = torch.histogram(empirical_1, bins=bin_edges, density=True)  # [n_bins]
 
         marginal_1 = gmm_2d.marginal_gmm(dim=1)
-        log_probs_1 = marginal_1.log_prob(bin_centers_reshaped)  # [n_bins]
-        analytical_probs_1 = torch.exp(log_probs_1)  # [n_bins]
+        log_probs_1 = marginal_1.log_prob(bin_centers_reshaped)  # [n_bins, BS]
+        analytical_probs_1 = torch.exp(log_probs_1)  # [n_bins, BS]
 
         # Compare pointwise
-        torch.testing.assert_close(hist_empirical_1, analytical_probs_1, atol=0.01, rtol=0.1)
+        torch.testing.assert_close(hist_empirical_1, analytical_probs_1[:, 0], atol=0.01, rtol=0.1)
 
 
 class TestTemperatureSampling:
@@ -351,9 +360,9 @@ class TestTemperatureSampling:
         We're testing in probability space (not log probability space)
         Log probability space has values that are too large and the tests trigger negatively
         """
-        mu = torch.randn(1, 1)
-        sigma = torch.ones(1, 1) * 0.5
-        weight = torch.ones(1)
+        mu = torch.randn(1, 1, 1)
+        sigma = torch.ones(1, 1, 1) * 0.5
+        weight = torch.ones(1, 1)
         gmm = TimeDependentGMM(mu, sigma, weight)
         for temperature in [0.01, 0.1, 0.5, 1.0, 2.0, 5.0]:
             temperature_gmm = TimeDependentGMM(mu, sigma / temperature**0.5, weight)
@@ -382,9 +391,9 @@ class TestTemperatureSampling:
 
         Only valid for a 1D Gaussian
         """
-        mu = torch.randn(1, 1)
-        sigma = torch.ones(1, 1) * 0.5
-        weight = torch.ones(1)
+        mu = torch.randn(1, 1, 1)
+        sigma = torch.ones(1, 1, 1) * 0.5
+        weight = torch.ones(1, 1)
         gmm = TimeDependentGMM(mu, sigma, weight)
         for temperature in [0.01, 0.1, 0.5, 1.0, 2.0, 5.0]:
             temperature_gmm = TimeDependentGMM(mu, sigma / temperature**0.5, weight)
