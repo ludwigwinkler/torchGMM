@@ -418,6 +418,28 @@ class TimeDependentGMM(torch.nn.Module):
         return samples
 
 
+class Conditional(TimeDependentGMM):
+    """
+    Conditional Process class
+    Instead of simulating the full GMM, we only simulate the conditional process conditioned on the initial value x0.
+    This is useful for conditional sampling and inference.
+
+    Args:
+        x0: [BS, d] - initial value
+        schedule: BetaSchedule - schedule for the conditional process
+
+    Returns:
+        Conditional - Conditional process
+    """
+
+    def __init__(self, x0: torch.Tensor, schedule: BetaSchedule = None):
+        assert x0.dim() == 2, f"x0 needs to be 2D"
+        mu = x0.unsqueeze(1)  # [BS, d] -> [BS, 1, d]
+        sigma = torch.zeros_like(mu) + 1e-10
+        weight = torch.ones((mu.shape[0], 1), device=mu.device, dtype=mu.dtype)
+        super().__init__(mu, sigma, weight, schedule)
+
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
@@ -441,13 +463,3 @@ if __name__ == "__main__":
         return gmm.energy(x), x
 
     init_samples = torch.randn(500, 2)
-    # samples, _, _ = batch_langevin(sample_fn, init_samples, n_steps=5_000, step_size=0.1, burn_in=200)
-    # plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
-    # plt.grid()
-    # plt.show()
-    #
-    # init_samples = torch.randn(500, 2)
-    # samples, _, _ = batch_mh(sample_fn, init_samples, n_steps=5_000, step_sigma=0.1, burn_in=200)
-    # plt.hist2d(samples[:, 0], samples[:, 1], bins=100)
-    # plt.grid()
-    # plt.show()
