@@ -18,7 +18,7 @@ torch.manual_seed(100)
 x_grid = torch.linspace(-5, 5, 100).reshape(-1, 1)
 x0 = torch.linspace(-3, 3, 5).reshape(-1, 1)
 mu = torch.tensor([-2, 0, 2]).reshape(1, 3, 1)
-sigma = torch.tensor([0.3, 0.5, 0.2]).reshape(1, 3, 1)
+sigma = torch.tensor([0.3, 0.1, 0.2]).reshape(1, 3, 1)
 weight = torch.tensor([0.33, 0.5, 0.1]).reshape(1, 3)
 
 gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight)
@@ -93,7 +93,7 @@ for each batch element, we need to extract the diagonal of the score function
 dt = 1 / 100
 for t in torch.linspace(1.0, 0.01, 100):
     beta_t = gmm.schedule.beta(t)
-    print(x.shape, t.shape, gmm.mu.shape, gmm.score(x, t, batched_data=True).shape)
+    # print(x.shape, t.shape, gmm.mu.shape, gmm.score(x, t, batched_data=True).shape)
     dx = (
         -(-0.5 * beta_t * x * dt)
         + (beta_t * gmm.score(x, t, batched_data=True)) * dt
