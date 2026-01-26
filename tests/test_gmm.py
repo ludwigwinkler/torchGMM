@@ -4,15 +4,6 @@ import pytest
 import torch
 import einops
 
-
-from torchGMM.diffusion import (
-    denoising_and_resample_fkc,
-    denoising_and_resample_fksmc,
-    denoising_and_resample_smc,
-    denoising_and_resample_smclangevin,
-    reverse_diffusion,
-    reverse_diffusion_with_regular_resampling,
-)
 from torchGMM.gmm import TimeDependentGMM, Conditional
 from torchGMM.schedule import BetaSchedule
 
@@ -150,6 +141,34 @@ class TestShapes:
             2,
             3,
         ), f"Expected ({sample_event_shape}, 2, 3), got {t_processed.shape}"
+
+    @pytest.mark.parametrize(
+        "x_shape, batched_data, t",
+        [
+            ((50, 2), False, 0.5),  # Unbatched, scalar time
+            ((50, 2), False, torch.rand(50)),  # Unbatched, per-sample time
+            ((50, 5, 4, 2), False, 0.5),  # Batched, scalar time
+        ],
+    )
+    def test_single_batch_dim_dropping(self, x_shape, batched_data, t):
+        """Test score output shapes with different input/t setups using parametrize"""
+        mu1 = torch.randn(1, 5, 2)
+        sigma1 = torch.ones(1, 5, 2) * 0.5
+        weight1 = torch.ones(1, 5)
+        gmm_single_batch = TimeDependentGMM(mu1, sigma1, weight1)
+
+        mu2 = torch.randn(2, 5, 2)
+        sigma2 = torch.ones(2, 5, 2) * 0.5
+        weight2 = torch.ones(2, 5)
+        gmm_multiple_batch = TimeDependentGMM(mu2, sigma2, weight2)
+
+        x = torch.randn(*x_shape)
+        score_single_batch = gmm_single_batch.score(x, t=t, batched_data=batched_data)
+        score_multiple_batch = gmm_multiple_batch.score(x, t=t, batched_data=batched_data)
+        assert score_single_batch.shape == x_shape, f"Expected (50, 2), got {score_single_batch.shape}"
+        assert (
+            score_multiple_batch.shape == x.shape[:-1] + (2,) + x.shape[-1:]
+        ), f"Expected (50, 2, 2), got {score_multiple_batch.shape}"
 
 
 class TestDistribution:

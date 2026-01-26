@@ -41,7 +41,7 @@ def forward_diffusion(
         drift = -0.5 * beta_t * x
         diffusion = torch.sqrt(beta_t)
         noise = torch.randn_like(x, device=x.device)
-
+        assert x.shape == drift.shape, f"x.shape: {x.shape}, drift.shape: {drift.shape}"
         # Apply Euler-Maruyama step: x_{t+dt} = x_t + drift*dt + diffusion*sqrt(dt)*noise
         x = x + drift * dt_ + diffusion * torch.sqrt(torch.tensor(dt_, device=x.device)) * noise
         trajectory.append(x.clone())
@@ -71,16 +71,16 @@ def reverse_diffusion(
     dt_ = t[1:] - t[:-1]  # t_{k+1} - t_k
     for t_, dt_ in zip(t[:-1], dt_):
         # Get beta value for current time step
+        assert torch.all(dt_ < 0), f"dt_ must be negative, got {dt_}"
         beta_t = schedule.beta(t_)  # [n_samples, 1]
         diffusion = torch.sqrt(beta_t)
         # Compute drift and diffusion terms for forward SDE
         score = score_fn(x, t_)
-
+        assert x.shape == score.shape, f"x.shape: {x.shape}, score.shape: {score.shape}"
         drift = -0.5 * beta_t * x - diffusion**2 * score
 
         noise = torch.randn_like(x, device=x.device)
         # Apply Euler-Maruyama step: x_{t+dt} = x_t + drift*dt + diffusion*sqrt(dt)*noise
-
         x = x + drift * dt_ + diffusion * torch.sqrt(dt_.abs()) * noise
 
         trajectory.append(x.clone())

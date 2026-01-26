@@ -124,8 +124,13 @@ class TimeDependentGMM(torch.nn.Module):
         # Compute log probability: [N1, ... Nk, B1, ... , Bk]
         log_prob = gmm_t.log_prob(x_batched)
 
-        # Reshape to [*sample_event_shape, *batch_shape]
-        # log_prob = log_prob_flat.reshape(*sample_event_shape, *self.batch_shape)
+        assert log_prob.shape == (
+            *sample_event_shape,
+            *self.batch_shape,
+        ), f"log_prob shape {log_prob.shape} must match sample_event_shape {sample_event_shape} and batch_shape {self.batch_shape}"
+
+        if self.batch_shape == (1,) and not batched_data:
+            log_prob = log_prob.squeeze(-1)  # [*N, BS=1] -> [*N]
 
         return log_prob
 
@@ -394,10 +399,14 @@ class TimeDependentGMM(torch.nn.Module):
 
         # Compute gradient: [N_total, *batch_shape, Dim]
         score = torch.autograd.grad(log_prob.sum(), x_batched, create_graph=False)[0]
+        assert score.shape == (
+            *sample_event_shape,
+            *self.batch_shape,
+            self.dim,
+        ), f"score shape {score.shape} must match sample_event_shape {sample_event_shape} and batch_shape {self.batch_shape} and dim {self.dim}"
 
-        # Reshape to [*sample_event_shape, *batch_shape, *event_shape]
-        # score = score_flat.reshape(*sample_event_shape, *self.batch_shape, *self.event_shape)
-
+        if self.batch_shape == (1,) and not batched_data:
+            score = score.squeeze(-2)  # [N_total, *batch_shape, 1] -> [N_total, *batch_shape]
         return score
 
     def sample(self, shape: tuple | int | None = None, t: torch.Tensor | float | None = None) -> torch.Tensor:

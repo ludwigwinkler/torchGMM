@@ -15,7 +15,6 @@ x = gmm.sample(500, t=0.0)
 t = torch.linspace(0.00, 1.0, 100)
 trajectory = forward_diffusion(schedule, x, t)
 
-import matplotlib.pyplot as plt
 
 # Trajectory: [n_steps+1, n_samples, 1]
 
@@ -33,7 +32,8 @@ x = torch.randn(1000, 1)
 t = torch.linspace(1.0, 0.00, 100)
 x_grid = torch.linspace(-5, 5, 100).reshape(-1, 1)
 target_dist = gmm.log_prob(x_grid, t=0.0).exp()
-trajectory = reverse_diffusion(schedule, lambda x, t: gmm.score(x, t)[:, 0, :], x, t)
+print(f"{target_dist.shape=}")
+trajectory = reverse_diffusion(schedule, lambda x, t: gmm.score(x, t), x, t)
 print(trajectory.shape)
 
 # Visualize some example trajectories for a subset of particles
