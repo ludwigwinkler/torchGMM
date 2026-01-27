@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.cm import get_cmap
+from tqdm import tqdm
 
 torch.manual_seed(100)
 
@@ -116,12 +117,12 @@ plt.show()
 # # Reverse Diffusion with Transition Kernel Score
 gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight)
 
-x = torch.randn(500, 1)
+x = torch.randn(1_000, 1)
 colors = plt.cm.get_cmap("viridis", x0.shape[0])
 xt = []
 
 dt = 1 / 100
-for t in torch.linspace(1.0, 0.01, 100):
+for t in tqdm(torch.linspace(1.0, 0.01, 100)):
     beta_t = gmm.schedule.beta(t)
     x0_ = torch.randn_like(x)
     with torch.enable_grad():
@@ -132,7 +133,7 @@ for t in torch.linspace(1.0, 0.01, 100):
         # print(f"{logpx.shape=}")
         grad_logpx_x0 = torch.autograd.grad(logpx_x0.sum(), x, create_graph=False)[0]  # [BS, 1]
         # print(f"{grad_logpx_x0.shape=}")
-        grad_logpx = gmm.score(x, t)[:, 0, :]
+        grad_logpx = gmm.score(x, t)  # [:, 0, :]
         score = grad_logpx_x0 - (grad_logpx_x0 - grad_logpx)
     dx = -(-0.5 * beta_t * x * dt) + (beta_t * score) * dt + torch.sqrt(beta_t) * torch.randn_like(x) * dt**0.5
     x = x + dx
@@ -140,13 +141,14 @@ for t in torch.linspace(1.0, 0.01, 100):
 xt = torch.stack(xt).detach()
 t = torch.linspace(1, 0.01, 100)
 print(xt.shape)
-# for x0_idx in range(x0.shape[0]):
-plt.plot(t, xt[:, :, 0], color=colors(x0_idx), alpha=0.2)
-plt.legend()
-plt.title("$\u2190$ Reverse Diffusion $\u2190$")
-plt.xlabel("t")
-plt.ylabel("x")
+fig, axs = plt.subplots(1, 2, figsize=(20, 10), sharey=True)
+axs[1].plot(t, xt[:, :, 0], color=colors(x0_idx), alpha=0.2)
+axs[1].legend()
+axs[1].set_title("$\u2190$ Reverse Diffusion $\u2190$")
+axs[0].invert_xaxis()
+axs[0].hist(xt[-1, :, 0].flatten(), bins=100, density=True, orientation="horizontal")
+axs[0].plot(gmm(x_grid).exp(), x_grid)
+axs[0].set_title("$\u2190$ Target of Reverse Diffusion $\u2190$")
+axs[0].set_xlabel("t")
+axs[0].set_ylabel("x")
 plt.show()
-
-plt.hist(xt[-1, :, 0].flatten(), bins=100, density=True)
-plt.plot(x_grid, gmm(x_grid).exp())
