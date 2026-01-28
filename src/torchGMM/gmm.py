@@ -37,7 +37,7 @@ class TimeDependentGMM(torch.nn.Module):
         if sigma is None:
             sigma = torch.zeros_like(mu) + 1e-10
         if weight is None:
-            weight = torch.ones((*mu.shape[:-2], 1), device=mu.device, dtype=mu.dtype)
+            weight = mu.new_ones((*mu.shape[:-2], 1))
 
         assert (
             mu.shape[:-1] == sigma.shape[:-1] == weight.shape
@@ -55,23 +55,10 @@ class TimeDependentGMM(torch.nn.Module):
             mu.shape[-2] == weight.shape[-1]
         ), f"Number of components must match: mu {mu.shape[-2]}, weight {weight.shape[-1]}"
 
+        weight = weight / weight.sum(dim=-1, keepdim=True)
         self.register_buffer("mu", mu)
         self.register_buffer("sigma", sigma)
         self.register_buffer("weight", weight)
-
-        # Normalize weights per GMM: [..., k] -> [..., k]
-        weight_normalized = weight / weight.sum(dim=-1, keepdim=True)
-
-        # Create batched Categorical distributions: batch_shape=[*batch_shape], event_shape=[]
-        self.mix = Categorical(weight_normalized)
-
-        # Create batched MultivariateNormal components
-        # sigma: [..., k, d] -> covar: [..., k, d, d]
-        covar = torch.diag_embed(sigma.pow(2))
-        self.comp = MultivariateNormal(mu, covar)  # batch_shape=[*batch_shape, k], event_shape=[d]
-
-        # Create batched MixtureSameFamily: batch_shape=[*batch_shape], event_shape=[d]
-        self.gmm = MixtureSameFamily(self.mix, self.comp)
 
         self.batch_shape = mu.shape[:-2]  # [...BS, K, D]
         self.batch_ndim = len(self.batch_shape)  # #batch_dims
@@ -85,7 +72,6 @@ class TimeDependentGMM(torch.nn.Module):
         self.event_shape = (self.dim,)  # [Dim]
 
         self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if not schedule else schedule
-        self.schedule.to(mu.device)
 
     def __call__(self, x: torch.Tensor, t: torch.Tensor | None = None, batched_data: bool = False) -> torch.Tensor:
         """
@@ -147,13 +133,13 @@ class TimeDependentGMM(torch.nn.Module):
         """
         if t is None:
             # Default to t=0 for all sample events
-            t = torch.zeros(*sample_event_shape, *self.batch_shape, device=self.mu.device)
+            t = self.mu.new_ones(*sample_event_shape, *self.batch_shape) * 0.0
         elif not isinstance(t, torch.Tensor):
             # t is a scalar -> broadcast to [*sample_event_shape, *batch_shape]
-            t = torch.full((*sample_event_shape, *self.batch_shape), float(t), device=self.mu.device)
+            t = self.mu.new_ones(*sample_event_shape, *self.batch_shape) * float(t)
         elif t.dim() == 0:
             # Scalar tensor -> broadcast to sample_event_shape
-            t = torch.full((*sample_event_shape, *self.batch_shape), t.item(), device=self.mu.device)
+            t = self.mu.new_ones((*sample_event_shape, *self.batch_shape)) * t.item()
         elif t.shape == sample_event_shape:
             # Broadcast from [N1, ... , Nk] to [N1, ... , Nk, BS1, ... , BSk]
             expand_shape = (*sample_event_shape, *self.batch_shape)
@@ -217,7 +203,7 @@ class TimeDependentGMM(torch.nn.Module):
 
         # Create batched Categorical mixture
         # batch_shape=[N_total, *batch_shape], event_shape=[]
-        batched_probs = torch.ones(t.shape).unsqueeze(-1) * self.mix.probs
+        batched_probs = torch.ones(t.shape, device=self.weight.device).unsqueeze(-1) * self.weight
         mix = Categorical(batched_probs)
 
         # Create batched MixtureSameFamily
@@ -251,7 +237,7 @@ class TimeDependentGMM(torch.nn.Module):
         mu_marginal = self.mu[..., dim].unsqueeze(-1)  # [..., k, 1]
         sigma_marginal = self.sigma[..., dim].unsqueeze(-1)  # [..., k, 1]
 
-        return TimeDependentGMM(mu_marginal, sigma_marginal, self.mix.probs, self.schedule)
+        return TimeDependentGMM(mu_marginal, sigma_marginal, self.weight, self.schedule)
 
     def drop_mode(self, component_index: int) -> "TimeDependentGMM":
         """
@@ -261,18 +247,18 @@ class TimeDependentGMM(torch.nn.Module):
 
         def _pop_batched(thing_to_pop, component_index, component_dim):
             # Remove index component_index from component_dim for all batches
-            indices = torch.arange(thing_to_pop.shape[component_dim], device=thing_to_pop.device)
+            indices = torch.arange(thing_to_pop.shape[component_dim], dtype=torch.long, device=thing_to_pop.device)
             mask = indices != component_index
             return thing_to_pop.index_select(component_dim, mask.nonzero(as_tuple=True)[0])
 
         mu_new = _pop_batched(self.mu, component_index, -2)  # [..., k-1, d]
         sigma_new = _pop_batched(self.sigma, component_index, -2)  # [..., k-1, d]
-        probs_new = _pop_batched(self.mix.probs, component_index, -1)  # [..., k-1]
+        weight_new = _pop_batched(self.weight, component_index, -1)  # [..., k-1]
 
         # Renormalize weights for each GMM in batch
-        probs_new = probs_new / probs_new.sum(dim=-1, keepdim=True)
+        weight_new = weight_new / weight_new.sum(dim=-1, keepdim=True)
 
-        return TimeDependentGMM(mu_new, sigma_new, probs_new, self.schedule)
+        return TimeDependentGMM(mu_new, sigma_new, weight_new, self.schedule)
 
     def log_prob(self, x: torch.Tensor, t: torch.Tensor | None = None, batched_data: bool = False) -> torch.Tensor:
         """
@@ -321,7 +307,7 @@ class TimeDependentGMM(torch.nn.Module):
 
         # std_t: [N_total, *batch_shape, Components, 1]
         increasing_var_t = einops.einsum(
-            sigma_t**2, torch.ones(self.num_components, 1, device=self.mu.device), "n ... , k d -> n ... k d"
+            sigma_t**2, self.mu.new_ones(self.num_components, 1), "n ... , k d -> n ... k d"
         )
         decreasing_var_t = einops.einsum(alpha_t, self.sigma, "n ... , ... k d -> n ... k d") ** 2
         var_t = increasing_var_t + decreasing_var_t
@@ -334,7 +320,7 @@ class TimeDependentGMM(torch.nn.Module):
         component_cdf = Normal(mu_t.squeeze(-1), std_t.squeeze(-1)).cdf(x_expanded.squeeze(-1))
 
         # Mix CDFs using einsum: [N_total, *batch_shape, Components] * [*batch_shape, Components] -> [N_total, *batch_shape]
-        batched_probs = einops.repeat(self.mix.probs, "... k -> n ... k", n=t_flat.shape[0])
+        batched_probs = einops.repeat(self.weight, "... k -> n ... k", n=t_flat.shape[0])
         mix_cdf_flat = einops.einsum(component_cdf, batched_probs, "n ... k, n ... k -> n ...")
 
         # Reshape to [*sample_event_shape, *batch_shape]
@@ -467,7 +453,7 @@ class Conditional(TimeDependentGMM):
         mu = x0.unsqueeze(-2)  # [..., d] -> [..., 1, d]
         assert mu.dim() == x0.dim() + 1, f"mu must be a tensor [..., 1, d], got {mu.shape}"
         sigma = torch.zeros_like(mu) + 1e-10
-        weight = torch.ones((*mu.shape[:-2], 1), device=mu.device, dtype=mu.dtype)
+        weight = mu.new_ones((*mu.shape[:-2], 1))
         super().__init__(mu, sigma, weight, schedule)
 
 

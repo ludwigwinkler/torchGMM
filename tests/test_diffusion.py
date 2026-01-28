@@ -15,6 +15,16 @@ from torchGMM.gmm import TimeDependentGMM
 from torchGMM.schedule import BetaSchedule
 
 
+def get_local_device():
+    """Fixture that returns the best available device (MPS, CUDA, or CPU)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+
 @pytest.fixture
 def gmm_model():
     """Fixture for the GMM model used in diffusion tests."""
@@ -30,7 +40,7 @@ class TestDiffusion:
         schedule = BetaSchedule()
 
         # Sample from the GMM at t=0
-        x = gmm_model.sample(50_000, t=0.0)[:, 0]  # [*N, *BS=1, D=1]
+        x = gmm_model.sample(10_000, t=0.0)[:, 0]  # [*N, *BS=1, D=1]
         t = torch.linspace(0.00, 1.0, 100)
 
         # Run forward diffusion
@@ -63,15 +73,15 @@ class TestDiffusion:
             # target_dist is shape [100, 1] for x_grid of shape [100, 1]
             # Assert the empirical distribution matches the target within some tolerance
 
-            # plt.plot(hist, label=f"t={t_}")
-            # plt.plot(target_dist, label=f"t={t_}")
+            # plt.plot(hist, label=f"hist t={t_}")
+            # plt.plot(target_dist, label=f"ground trutht={t_}")
             # plt.legend()
             # plt.show()
             assert target_dist.shape == hist.shape, f"target_dist.shape: {target_dist.shape}, hist.shape: {hist.shape}"
 
             assert (
                 hist - target_dist
-            ).abs().max() < 0.05, f"hist-target_dist.abs().max() @ t={t_}: {hist-target_dist.abs().max()}"
+            ).abs().max() < 0.05, f"hist-target_dist.abs().max() @ t={t_}: {(hist-target_dist).abs().max()}"
 
     def test_reverse_diffusion(self, gmm_model):
         schedule = BetaSchedule()
@@ -119,3 +129,55 @@ class TestDiffusion:
             assert (
                 hist - target_dist
             ).abs().max() < 0.05, f"hist-target_dist.abs().max() @ t={t_}: {hist-target_dist.abs().max()}"
+
+
+class TestDiffusionDeviceHandling:
+    """Test device handling for diffusion functions"""
+
+    def test_forward_diffusion_cpu(self, gmm_model):
+        """Test forward diffusion works on CPU"""
+        schedule = BetaSchedule()
+        x = gmm_model.sample(100, t=0.0)[:, 0]
+        t = torch.linspace(0.0, 1.0, 50)
+
+        trajectory = forward_diffusion(schedule, x, t)
+
+        assert trajectory.device.type == "cpu"
+        assert trajectory.shape == (len(t), 100, 1)
+
+    def test_forward_diffusion_on_accelerator(self, gmm_model):
+        device = get_local_device()
+        """Test forward diffusion works on CUDA"""
+        schedule = BetaSchedule()
+        gmm = gmm_model.to(device)
+        x = gmm.sample(100, t=0.0)[:, 0]
+        t = torch.linspace(0.0, 1.0, 50, device=device)
+
+        trajectory = forward_diffusion(schedule.to(device), x, t)
+
+        assert trajectory.device == x.device
+        assert trajectory.shape == (len(t), 100, 1)
+
+    def test_reverse_diffusion_cpu(self, gmm_model):
+        """Test reverse diffusion works on CPU"""
+        schedule = BetaSchedule()
+        x = torch.randn(100, 1)
+        t = torch.linspace(1.0, 0.0, 50)
+
+        trajectory = reverse_diffusion(schedule, lambda x, t: gmm_model.score(x, t), x, t)
+
+        assert trajectory.device.type == "cpu"
+        assert trajectory.shape == (len(t), 100, 1)
+
+    def test_reverse_diffusion_on_accelerator(self, gmm_model):
+        device = get_local_device()
+        """Test reverse diffusion works on CUDA"""
+        schedule = BetaSchedule()
+        gmm = gmm_model.to(device)
+        x = torch.randn(100, 1, device=device)
+        t = torch.linspace(1.0, 0.0, 50, device=device)
+
+        trajectory = reverse_diffusion(schedule.to(device), lambda x, t: gmm.score(x, t), x, t)
+
+        assert trajectory.device == x.device
+        assert trajectory.shape == (len(t), 100, 1)

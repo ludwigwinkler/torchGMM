@@ -8,6 +8,16 @@ from torchGMM.gmm import TimeDependentGMM, Conditional
 from torchGMM.schedule import BetaSchedule
 
 
+def get_local_device():
+    """Fixture that returns the best available device (MPS, CUDA, or CPU)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+
 @pytest.fixture
 def simple_gmm_2d():
     """Create a simple 2-component 2D GMM with known parameters"""
@@ -405,7 +415,6 @@ class TestConditional:
         assert cond_gmm.mu.shape == (10, 1, 2)
         assert cond_gmm.sigma.shape == (10, 1, 2)
         assert cond_gmm.weight.shape == (10, 1)
-        assert cond_gmm.mix.probs.shape == (10, 1)
         assert cond_gmm.batch_shape == (10,)
         assert cond_gmm.event_shape == (2,)
 
@@ -429,3 +438,31 @@ class TestConditional:
         # Test energy
         energy = cond_gmm.energy(x, t=0.0, batched_data=True)
         assert energy.shape == (11, 10), f"Expected (11, 10), got {energy.shape}"
+
+
+class TestDeviceHandling:
+    """Test device handling for TimeDependentGMM"""
+
+    @pytest.mark.parametrize("local_device", [torch.device("cpu"), get_local_device()])
+    def test_log_prob_and_score_on_device(self, simple_gmm_2d, local_device):
+        """
+        Create GMM on the specified device, evaluate log_prob and score.
+        """
+        gmm, expected_mean, expected_std = simple_gmm_2d
+
+        # Move GMM to the desired device
+        gmm = gmm.to(local_device)
+
+        # Create some test data on the same device
+        x = torch.tensor([[0.0, 0.0]], device=local_device)  # shape [1, 2]
+        t = torch.tensor(0.0, device=local_device)
+
+        # Evaluate log_prob and score (batched_data=False)
+        log_prob = gmm.log_prob(x, t=t)
+        score = gmm.score(x, t=t)
+
+        assert log_prob.shape == (1,)
+        assert score.shape == (1, 2)
+
+        assert log_prob.device == x.device
+        assert score.device == x.device
