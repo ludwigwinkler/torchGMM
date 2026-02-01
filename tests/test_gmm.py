@@ -62,123 +62,110 @@ class TestShapes:
         assert gmm.batch_shape == expected_batch_shape
 
     @pytest.mark.parametrize(
-        "x_shape, t, expected_shape",
+        "shape, t, expected_shape",
         [
-            (None, 0.5, (5, 4, 2)),  # No shape, scalar time -> [batch_shape, Dim]
-            (None, None, (5, 4, 2)),  # No shape, no time -> [batch_shape, Dim]
-            (100, torch.ones(100) * 0.5, (100, 5, 4, 2)),  # Integer shape, scalar time
-            ((10, 20), 0.5, (10, 20, 5, 4, 2)),  # Tuple shape, scalar time
+            (None, 0.5, (5, 4, 2)),  # No sample dims, scalar t -> [*B, D]
+            ((100, 5, 4), torch.ones(100, 5, 4), (100, 5, 4, 2)),  # No sample dims, [*B] t -> [*B, D]
+            (None, None, (5, 4, 2)),
+            (100, 0.5, (100, 5, 4, 2)),  # sample shape (100,), scalar t
+            ((10, 20), 0.5, (10, 20, 5, 4, 2)),
+            ((10, 20, 5, 4), torch.ones(10, 20, 5, 4), (10, 20, 5, 4, 2)),
         ],
     )
-    def test_sample_shapes_various_inputs(self, x_shape, t, expected_shape):
-        """Test sample() output shapes with different shape/t time inputs using parametrize"""
-        mu = torch.randn(5, 4, 3, 2)
-        sigma = torch.ones(5, 4, 3, 2) * 0.5
-        weight = torch.ones(5, 4, 3)
+    def test_sample_shapes_various_inputs(self, shape, t, expected_shape):
+        """Test sample(shape, t) output shapes. x: [*N,*B,D], t: scalar or [*B] or [*N,*B]."""
+        mu = torch.randn(5, 4, 3, 2)  # [B1, B2, K, D]
+        sigma = torch.ones(5, 4, 3, 2) * 0.5  # [B1, B2, K, D]
+        weight = torch.ones(5, 4, 3)  # [B1, B2, K]
         gmm = TimeDependentGMM(mu, sigma, weight)
-
-        samples = gmm.sample(x_shape, t)
+        samples = gmm.sample(shape=shape, t=t)
         assert samples.shape == expected_shape, f"Expected {expected_shape}, got {samples.shape}"
 
     @pytest.mark.parametrize(
-        "x_shape, batched_data, t, expected_shape",
+        "x_shape, t, expected_shape",
         [
-            ((50, 2), False, 0.5, (50, 5, 4)),  # Unbatched, scalar time
-            ((50, 2), False, torch.rand(50), (50, 5, 4)),  # Unbatched, per-sample time
-            ((50, 5, 4, 2), True, 0.5, (50, 5, 4)),  # Batched, scalar time
-            ((50, 5, 4, 2), True, torch.rand(50), (50, 5, 4)),  # Batched, per-sample time
+            ((50, 5, 4, 2), 0.5, (50, 5, 4)),  # x [*N,*B,D], scalar t
+            ((50, 5, 4, 2), None, (50, 5, 4)),  # x [*N,*B,D], no t -> t=0
+            ((5, 4, 2), 0.5, (5, 4)),  # x [*B,D] only
         ],
     )
-    def test_logprob_shapes_various_inputs(self, x_shape, batched_data, t, expected_shape):
-        """Test log_prob output shapes with different input/t setups using parametrize"""
+    def test_logprob_shapes_various_inputs(self, x_shape, t, expected_shape):
+        """Test log_prob(x, t) output shapes. x: [*N,*B,D], t: scalar or [*B] or [*N,*B]."""
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
-
         x = torch.randn(*x_shape)
-        log_p = gmm(x, t=t, batched_data=batched_data)
+        log_p = gmm.log_prob(x, t=t)
         assert log_p.shape == expected_shape, f"Expected {expected_shape}, got {log_p.shape}"
 
     @pytest.mark.parametrize(
-        "x_shape, batched_data, t, expected_shape",
+        "x_shape, t, expected_shape",
         [
-            ((50, 2), False, 0.5, (50, 5, 4, 2)),  # Unbatched, scalar time
-            ((50, 2), False, torch.rand(50), (50, 5, 4, 2)),  # Unbatched, per-sample time
-            ((50, 5, 4, 2), False, 0.5, (50, 5, 4, 5, 4, 2)),  # Batched, scalar time
-            ((50, 5, 4, 2), True, 0.5, (50, 5, 4, 2)),  # Batched, scalar time
-            ((50, 5, 4, 2), True, torch.rand(50), (50, 5, 4, 2)),  # Batched, per-sample time
-            ((5, 10, 5, 4, 2), True, 0.5, (5, 10, 5, 4, 2)),  # Batched, 2D sample shape
+            ((50, 5, 4, 2), 0.5, (50, 5, 4, 2)),  # x [*N,*B,D], t scalar -> t [*N,*B]
+            ((5, 4, 2), 0.5, (5, 4, 2)),  # x [*B,D], t scalar -> t [*B]
+            ((5, 10, 5, 4, 2), 0.5, (5, 10, 5, 4, 2)),  # x [*N,*B,D], t scalar -> t [*N,*B]
         ],
     )
-    def test_score_shapes_various_inputs(self, x_shape, batched_data, t, expected_shape):
-        """Test score output shapes with different input/t setups using parametrize"""
+    def test_score_shapes_various_inputs(self, x_shape, t, expected_shape):
+        """Test score(x, t) output shapes. x: [*N,*B,D], t: scalar or [*B] or [*N,*B]."""
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
-
         x = torch.randn(*x_shape)
-        score = gmm.score(x, t=t, batched_data=batched_data)
+        score = gmm.score(x, t=t)
         assert score.shape == expected_shape, f"Expected {expected_shape}, got {score.shape}"
 
     @pytest.mark.parametrize(
-        "sample_event_shape, t",
+        "sample_shape, t",
         [
             ((100,), None),
             ((100,), 0.5),
             ((100,), torch.tensor(0.5)),
-            ((100,), torch.rand(100)),
-            ((100,), torch.rand(100, 2, 3)),
-            ((10, 20), None),
+            ((100,), torch.rand(5, 4)),  # t [*B]
             ((10, 20), 0.5),
-            ((10, 20), torch.rand(10, 20, 2, 3)),
             ((), None),
             ((), 0.5),
-            ((), torch.tensor(0.5)),
-            ((), torch.rand(2, 3)),
+            ((), torch.rand(5, 4)),
         ],
     )
-    def test_time_processing(self, sample_event_shape, t):
-        """Test time processing for all valid formats"""
-        mu = torch.randn(2, 3, 3, 2)
-        sigma = torch.ones(2, 3, 3, 2) * 0.5
-        weight = torch.ones(2, 3, 3)
+    def test_expand_t(self, sample_shape, t):
+        """Test _expand_t returns shape (*sample_shape, *batch_shape)."""
+        mu = torch.randn(5, 4, 3, 2)
+        sigma = torch.ones(5, 4, 3, 2) * 0.5
+        weight = torch.ones(5, 4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
+        t_exp = gmm._expand_t(t, sample_shape)
+        assert t_exp.shape == (*sample_shape, 5, 4), f"Expected (*{sample_shape}, 2, 3), got {t_exp.shape}"
 
-        t_processed = gmm._process_time(t, sample_event_shape=sample_event_shape)
-        assert t_processed.shape == sample_event_shape + (
-            2,
-            3,
-        ), f"Expected ({sample_event_shape}, 2, 3), got {t_processed.shape}"
+    def test_invalid_t_shape_raises(self):
+        """Invalid t shape (neither [*B] nor [*N,*B]) raises."""
+        mu = torch.randn(5, 4, 3, 2)
+        sigma = torch.ones(5, 4, 3, 2) * 0.5
+        weight = torch.ones(5, 4, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight)
+        x = torch.randn(50, 5, 4, 2)  # [N, B, D], batch_shape=(5, 4)
+        t_bad = torch.rand(50, 2)  # wrong trailing dims; need (5, 4) or (50, 5, 4)
+        with pytest.raises(ValueError, match="t must be of shape"):
+            gmm.log_prob(x, t=t_bad)
 
-    @pytest.mark.parametrize(
-        "x_shape, batched_data, t",
-        [
-            ((50, 2), False, 0.5),  # Unbatched, scalar time
-            ((50, 2), False, torch.rand(50)),  # Unbatched, per-sample time
-            ((50, 5, 4, 2), False, 0.5),  # Batched, scalar time
-        ],
-    )
-    def test_single_batch_dim_dropping(self, x_shape, batched_data, t):
-        """Test score output shapes with different input/t setups using parametrize"""
+    def test_single_batch_dim_dropping(self):
+        """Test score output shapes: x [*N,*B,D] -> score [*N,*B,D]."""
         mu1 = torch.randn(1, 5, 2)
         sigma1 = torch.ones(1, 5, 2) * 0.5
         weight1 = torch.ones(1, 5)
         gmm_single_batch = TimeDependentGMM(mu1, sigma1, weight1)
-
         mu2 = torch.randn(2, 5, 2)
         sigma2 = torch.ones(2, 5, 2) * 0.5
         weight2 = torch.ones(2, 5)
         gmm_multiple_batch = TimeDependentGMM(mu2, sigma2, weight2)
-
-        x = torch.randn(*x_shape)
-        score_single_batch = gmm_single_batch.score(x, t=t, batched_data=batched_data)
-        score_multiple_batch = gmm_multiple_batch.score(x, t=t, batched_data=batched_data)
-        assert score_single_batch.shape == x_shape, f"Expected (50, 2), got {score_single_batch.shape}"
-        assert (
-            score_multiple_batch.shape == x.shape[:-1] + (2,) + x.shape[-1:]
-        ), f"Expected (50, 2, 2), got {score_multiple_batch.shape}"
+        x_single = torch.randn(50, 1, 2)  # [N, B=1, D]
+        x_multi = torch.randn(50, 2, 2)  # [N, B=2, D]
+        score_single = gmm_single_batch.score(x_single, t=0.5)
+        score_multi = gmm_multiple_batch.score(x_multi, t=0.5)
+        assert score_single.shape == (50, 1, 2)
+        assert score_multi.shape == (50, 2, 2)
 
 
 class TestDistribution:
@@ -233,8 +220,8 @@ class TestDistribution:
 
         # Sample: [50, BS, Dim]
         gmm_samples = gmm.sample(shape=50, t=t)
-        gmm_score_all = gmm.score(gmm_samples, t=t, batched_data=True)  # [50, BS, Dim]
-        conditional_score_all = conditional.score(gmm_samples, t=t, batched_data=True)  # [50, BS, Dim]
+        gmm_score_all = gmm.score(gmm_samples, t=t)  # [50, BS, Dim]
+        conditional_score_all = conditional.score(gmm_samples, t=t)
 
         # For each batch index b, extract samples for that batch and evaluate
         # We want to compare score of samples[n, b, :] evaluated at GMM b
@@ -264,9 +251,9 @@ class TestGMMProperties:
         weight = torch.ones(1, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
-        x = torch.randn(50, 1, 2)
-        log_p = gmm(x, t=0.5, batched_data=True)
-        energy = gmm.energy(x, t=0.5, batched_data=True)
+        x = torch.randn(50, 1, 2)  # [N, B, D]
+        log_p = gmm.log_prob(x, t=0.5)
+        energy = gmm.energy(x, t=0.5)
 
         torch.testing.assert_close(energy, -log_p)
 
@@ -279,15 +266,10 @@ class TestGMMProperties:
         weight = torch.ones(4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
 
-        # Test with 1D sample_event_shape
-        x = torch.randn(10, 4, 2)
-
-        # Get score from gmm.score()
-        score = gmm.score(x, t=0.5, batched_data=True)
-
-        # Compute gradient manually
+        x = torch.randn(10, 4, 2)  # [N, B, D]
+        score = gmm.score(x, t=0.5)
         x_copy = x.clone().detach().requires_grad_(True)
-        log_p = gmm(x_copy, t=0.5, batched_data=True)
+        log_p = gmm.log_prob(x_copy, t=0.5)
         grad = torch.autograd.grad(log_p.sum(), x_copy)[0]
 
         # Score should be [10, 4, 2], grad should be [10, 4, 2]
@@ -325,7 +307,7 @@ class TestMarginalDistributions:
 
         marginal_0 = gmm_2d.marginal_gmm(dim=0)
         bin_centers_reshaped = bin_centers.unsqueeze(-1).unsqueeze(-1)  # [n_bins, 1, 1]
-        log_probs_0 = marginal_0.log_prob(bin_centers_reshaped, batched_data=True)  # [n_bins, BS=1]
+        log_probs_0 = marginal_0.log_prob(bin_centers_reshaped, t=0.0)
         analytical_probs_0 = torch.exp(log_probs_0)  # [n_bins, BS=1]
 
         # Compare pointwise
@@ -336,7 +318,7 @@ class TestMarginalDistributions:
         hist_empirical_1, _ = torch.histogram(empirical_1, bins=bin_edges, density=True)  # [n_bins]
 
         marginal_1 = gmm_2d.marginal_gmm(dim=1)
-        log_probs_1 = marginal_1.log_prob(bin_centers_reshaped, batched_data=True)  # [n_bins, BS=1]
+        log_probs_1 = marginal_1.log_prob(bin_centers_reshaped, t=0.0)
         analytical_probs_1 = torch.exp(log_probs_1)  # [n_bins, BS=1]
 
         # Compare pointwise
@@ -362,11 +344,10 @@ class TestTemperatureSampling:
             # Build a two dimensional meshgrid with points
             x_min, x_max, n_points = -3.0, 3.0, 100
             x_grid = torch.linspace(x_min, x_max, n_points)
-            mesh_points = x_grid.unsqueeze(-1).unsqueeze(-1)  # [N, BS=1, 1]
-            log_prob = gmm(mesh_points, t=0.0, batched_data=True)
+            mesh_points = x_grid.unsqueeze(-1).unsqueeze(-1)  # [N, 1, 1]
+            log_prob = gmm.log_prob(mesh_points, t=0.0)
             tempered_log_prob = temperature * log_prob
-            temperature_log_prob = temperature_gmm(mesh_points, t=0.0, batched_data=True)
-            # torch.testing.assert_close(temperature * log_prob, temperature_log_prob, atol=0.01, rtol=0.1)
+            temperature_log_prob = temperature_gmm.log_prob(mesh_points, t=0.0)
             prob = torch.exp(log_prob) / torch.exp(log_prob).sum()
             tempered_prob = torch.exp(tempered_log_prob) / torch.exp(tempered_log_prob).sum()
             temperature_prob = torch.exp(temperature_log_prob) / torch.exp(temperature_log_prob).sum()
@@ -393,11 +374,10 @@ class TestTemperatureSampling:
             # Build a one dimensional meshgrid with points
             x_min, x_max, n_points = -3.0, 3.0, 100
             x_grid = torch.linspace(x_min, x_max, n_points)
-            mesh_points = x_grid.unsqueeze(-1).unsqueeze(-1)  # [N, BS=1, 1]
-            log_prob = gmm(mesh_points, t=0.0, batched_data=True)
+            mesh_points = x_grid.unsqueeze(-1).unsqueeze(-1)  # [N, 1, 1]
+            log_prob = gmm.log_prob(mesh_points, t=0.0)
             tempered_log_prob = temperature * log_prob
-            temperature_log_prob = temperature_gmm(mesh_points, t=0.0, batched_data=True)
-            # torch.testing.assert_close(temperature * log_prob, temperature_log_prob, atol=0.01, rtol=0.1)
+            temperature_log_prob = temperature_gmm.log_prob(mesh_points, t=0.0)
             prob = torch.exp(log_prob) / torch.exp(log_prob).sum()
             tempered_prob = torch.exp(tempered_log_prob) / torch.exp(tempered_log_prob).sum()
             temperature_prob = torch.exp(temperature_log_prob) / torch.exp(temperature_log_prob).sum()
@@ -426,17 +406,12 @@ class TestConditional:
         samples = cond_gmm.sample(shape=50)
         assert samples.shape == (50, 10, 2), f"Expected (50, 10, 2), got {samples.shape}"
 
-        # Test log_prob
-        x = torch.randn(11, 10, 2)
-        log_prob = cond_gmm(x, t=0.0, batched_data=True)
+        x = torch.randn(11, 10, 2)  # [N, B, D]
+        log_prob = cond_gmm.log_prob(x, t=0.0)
         assert log_prob.shape == (11, 10), f"Expected (11, 10), got {log_prob.shape}"
-
-        # Test score
-        score = cond_gmm.score(x, t=0.0, batched_data=True)
+        score = cond_gmm.score(x, t=0.0)
         assert score.shape == (11, 10, 2), f"Expected (11, 10, 2), got {score.shape}"
-
-        # Test energy
-        energy = cond_gmm.energy(x, t=0.0, batched_data=True)
+        energy = cond_gmm.energy(x, t=0.0)
         assert energy.shape == (11, 10), f"Expected (11, 10), got {energy.shape}"
 
 
@@ -453,16 +428,12 @@ class TestDeviceHandling:
         # Move GMM to the desired device
         gmm = gmm.to(local_device)
 
-        # Create some test data on the same device
-        x = torch.tensor([[0.0, 0.0]], device=local_device)  # shape [1, 2]
+        x = torch.tensor([[0.0, 0.0]], device=local_device)  # [B=1, D=2]
         t = torch.tensor(0.0, device=local_device)
-
-        # Evaluate log_prob and score (batched_data=False)
         log_prob = gmm.log_prob(x, t=t)
         score = gmm.score(x, t=t)
-
-        assert log_prob.shape == (1,)
-        assert score.shape == (1, 2)
+        assert log_prob.shape == (1,)  # [*B]
+        assert score.shape == (1, 2)  # [*B, D]
 
         assert log_prob.device == x.device
         assert score.device == x.device

@@ -1,0 +1,27 @@
+---
+description: Pytest and test conventions for torchGMM
+globs: tests/**/*.py
+alwaysApply: false
+---
+
+# Tests
+
+- **Layout**: Tests in `tests/`; names `test_*.py` or `*_test.py`. Classes `Test*`, functions `test_*` (per pyproject.toml).
+- **Fixtures**: Use `@pytest.fixture` for shared setup (e.g. `simple_gmm_2d`, `gmm_model`). Provide a `get_local_device()`-style helper when tests need CPU/MPS/CUDA.
+- **Parametrize**: Use `@pytest.mark.parametrize` for shape/config variants instead of loops. Prefer one logical assertion per test.
+- **Markers**: Use `@pytest.mark.slow` or `@pytest.mark.integration` for long or integration tests; run fast suite with `-m "not slow"`.
+- **Imports**: Import package under test as `from torchGMM.gmm import ...` (not `import torchGMM` for direct class imports). Use `torch.set_printoptions(sci_mode=False)` in tests that check numeric output if helpful.
+
+```python
+# ✅ GOOD: fixture, parametrize, clear assertion
+@pytest.fixture
+def simple_gmm_2d():
+    mu = torch.tensor([[-1.0, 0.0], [1.0, 0.0]]).unsqueeze(0)
+    ...
+    return gmm, expected_mean, expected_std
+
+@pytest.mark.parametrize("x_shape, t, expected_shape", [(None, 0.5, (5, 4, 2)), ...])
+def test_sample_shapes_various_inputs(self, x_shape, t, expected_shape):
+    ...
+    assert samples.shape == expected_shape
+```
