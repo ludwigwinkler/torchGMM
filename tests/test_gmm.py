@@ -64,16 +64,16 @@ class TestShapes:
     @pytest.mark.parametrize(
         "shape, t, expected_shape",
         [
-            (None, 0.5, (5, 4, 2)),  # No sample dims, scalar t -> [*B, D]
-            ((100, 5, 4), torch.ones(100, 5, 4), (100, 5, 4, 2)),  # No sample dims, [*B] t -> [*B, D]
+            (None, 0.5, (5, 4, 2)),  # shape=None -> [*B,D], scalar t
+            ((100, 5, 4), torch.ones(100, 5, 4), (100, 5, 4, 2)),  # shape [*N,*B], t [*N,*B]
             (None, None, (5, 4, 2)),
-            (100, 0.5, (100, 5, 4, 2)),  # sample shape (100,), scalar t
-            ((10, 20), 0.5, (10, 20, 5, 4, 2)),
-            ((10, 20, 5, 4), torch.ones(10, 20, 5, 4), (10, 20, 5, 4, 2)),
+            (100, 0.5, (100, 5, 4, 2)),  # shape=int -> one sample dim, scalar t
+            ((10, 20, 5, 4), 0.5, (10, 20, 5, 4, 2)),  # shape [*N,*B], scalar t
+            ((10, 20, 5, 4), torch.ones(10, 20, 5, 4), (10, 20, 5, 4, 2)),  # shape [*N,*B], t [*N,*B]
         ],
     )
     def test_sample_shapes_various_inputs(self, shape, t, expected_shape):
-        """Test sample(shape, t) output shapes. x: [*N,*B,D], t: scalar or [*B] or [*N,*B]."""
+        """Test sample(shape, t). shape: full [*N,*B]; t: [*N,*B] or scalar (broadcast). Output [*N,*B,D]."""
         mu = torch.randn(5, 4, 3, 2)  # [B1, B2, K, D]
         sigma = torch.ones(5, 4, 3, 2) * 0.5  # [B1, B2, K, D]
         weight = torch.ones(5, 4, 3)  # [B1, B2, K]
@@ -118,26 +118,25 @@ class TestShapes:
         assert score.shape == expected_shape, f"Expected {expected_shape}, got {score.shape}"
 
     @pytest.mark.parametrize(
-        "sample_shape, t",
+        "sample_shape, t, sample_shape_expected",
         [
-            ((100,), None),
-            ((100,), 0.5),
-            ((100,), torch.tensor(0.5)),
-            ((100,), torch.rand(5, 4)),  # t [*B]
-            ((10, 20), 0.5),
-            ((), None),
-            ((), 0.5),
-            ((), torch.rand(5, 4)),
+            ((100,), None, (100, 5, 4)),
+            ((100,), 0.5, (100, 5, 4)),
+            ((100,), torch.tensor(0.5), (100, 5, 4)),
+            ((10, 20), 0.5, (10, 20, 5, 4)),
+            ((), None, (5, 4)),
+            ((), 0.5, (5, 4)),
+            ((), torch.rand(5, 4), (5, 4)),
         ],
     )
-    def test_expand_t(self, sample_shape, t):
+    def test_expand_t(self, sample_shape, t, sample_shape_expected):
         """Test _expand_t returns shape (*sample_shape, *batch_shape)."""
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
         gmm = TimeDependentGMM(mu, sigma, weight)
         t_exp = gmm._expand_t(t, sample_shape)
-        assert t_exp.shape == (*sample_shape, 5, 4), f"Expected (*{sample_shape}, 2, 3), got {t_exp.shape}"
+        assert t_exp.shape == sample_shape_expected, f"Expected (*{sample_shape}, 5, 4), got {t_exp.shape}"
 
     def test_invalid_t_shape_raises(self):
         """Invalid t shape (neither [*B] nor [*N,*B]) raises."""

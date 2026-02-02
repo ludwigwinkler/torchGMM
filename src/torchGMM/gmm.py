@@ -69,16 +69,19 @@ class TimeDependentGMM(torch.nn.Module):
     def _expand_t(self, t: numbers.Number | torch.Tensor | None, sample_shape: tuple) -> torch.Tensor:
         """Return t with shape [*sample_shape, *batch_shape]. Accept t scalar, [*B], or [*N,*B]."""
         if t is None:
-            return self.mu.new_ones(*sample_shape, *self.batch_shape) * 0.0
-        if not isinstance(t, torch.Tensor):
-            t = self.mu.new_ones(*self.batch_shape, device=self.mu.device) * float(t)
+            # None initializes to 0.0
+            return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * 0.0
+        elif not isinstance(t, torch.Tensor):
+            return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * float(t)
         elif t.dim() == 0:
-            t = self.mu.new_ones(*self.batch_shape, device=t.device) * t.item()
-        if t.shape == self.batch_shape:
-            return t.broadcast_to((*sample_shape, *self.batch_shape)).clone()
-        if t.shape == sample_shape:
+            return torch.ones(*(sample_shape + self.batch_shape), device=t.device, dtype=t.dtype) * t.item()
+        elif t.shape == sample_shape + self.batch_shape:
             return t
-        raise ValueError(f"t must be of shape {t.shape=} must be {sample_shape=} or {self.batch_shape=}")
+        elif t.shape == self.batch_shape and len(sample_shape) > 0:
+            return t.expand(sample_shape + self.batch_shape)
+        raise ValueError(
+            f"t must be of shape {t.shape if isinstance(t, torch.Tensor) else t} must be {sample_shape+self.batch_shape=}, got {t.shape if isinstance(t, torch.Tensor) else t}"
+        )
 
     def _gmm_t(self, t: torch.Tensor) -> MixtureSameFamily:
         """Marginal GMM at time t. t: [*N, *B]. Returns MixtureSameFamily with batch_shape=t.shape, event_shape=(D,)."""
@@ -157,6 +160,7 @@ class TimeDependentGMM(torch.nn.Module):
         ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
+        assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
         return self._gmm_t(t_exp).log_prob(x)
 
     def __call__(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
@@ -200,20 +204,25 @@ class TimeDependentGMM(torch.nn.Module):
         ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
+        assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
         x = x.requires_grad_(True)
         return torch.autograd.grad(self._gmm_t(t_exp).log_prob(x).sum(), x, create_graph=False)[0]
 
     def sample(self, shape: tuple | int | None = None, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
-        """sample(shape, t) -> [*N, *B, D]. shape: int or tuple (sample shape N); t: [*B] or [*N,*B] (or scalar)."""
+        """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: [*N,*B] or scalar (broadcast)."""
         if shape is None:
             sample_shape = ()
         elif isinstance(shape, int):
             sample_shape = (shape,)
         elif isinstance(shape, tuple):
-            sample_shape = shape
-        else:
-            raise ValueError(f"shape must be int, tuple, or None, got {type(shape)}")
+            assert (
+                shape[-self.batch_ndim :] == self.batch_shape
+            ), f"shape must end with batch_shape {self.batch_shape}, got {shape}"
+            sample_shape = shape[: -self.batch_ndim]
         t_exp = self._expand_t(t, sample_shape)
+        assert (
+            t_exp.shape == sample_shape + self.batch_shape
+        ), f"t_exp must have shape {sample_shape+self.batch_shape}, got {t_exp.shape}"
         return self._gmm_t(t_exp).sample()
 
     def __repr__(self):
