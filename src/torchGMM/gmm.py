@@ -26,6 +26,7 @@ class TimeDependentGMM(torch.nn.Module):
         assert (mu is not None and sigma is not None and weight is not None) or (
             mu is not None
         ), "Mu, sigma, and weight must be provided or just mu"
+        mu = torch.tensor(mu)
         assert mu.dim() >= 2, f"mu must be at least 2D [*, k, d], got {mu.shape}"
         sigma = torch.zeros_like(mu) + 1e-10 if sigma is None else torch.tensor(sigma)
         weight = mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.tensor(weight)
@@ -204,7 +205,9 @@ class TimeDependentGMM(torch.nn.Module):
         t_exp = self._expand_t(t, sample_shape)
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
         x = x.requires_grad_(True)
-        return torch.autograd.grad(self._gmm_t(t_exp).log_prob(x).sum(), x, create_graph=False)[0]
+        score = torch.autograd.grad(self._gmm_t(t_exp).log_prob(x).sum(), x, create_graph=False)[0].detach()
+        x = x.detach().requires_grad_(False)
+        return score
 
     def sample(self, shape: tuple | int | None = None, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
         """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: [*N,*B] or scalar (broadcast)."""

@@ -32,7 +32,7 @@ x = torch.randn(1000, 1, 1)  # [N, B=1, D=1]
 t = torch.linspace(1.0, 0.00, 100)
 x_grid = torch.linspace(-5, 5, 100).reshape(-1, 1, 1)  # [N, B=1, D=1]
 target_dist = gmm.log_prob(x_grid, t=0.0).exp().squeeze(-1)  # [N]
-trajectory = reverse_diffusion(schedule, lambda x_xt, t_xt: gmm.score(x_xt, t_xt), x, t)
+trajectory = reverse_diffusion(schedule, lambda x_xt, t_xt: gmm.score(x_xt, t_xt), x, t).detach()
 print(trajectory.shape)
 
 # Visualize some example trajectories for a subset of particles
