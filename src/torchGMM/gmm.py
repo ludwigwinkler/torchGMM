@@ -27,10 +27,8 @@ class TimeDependentGMM(torch.nn.Module):
             mu is not None
         ), "Mu, sigma, and weight must be provided or just mu"
         assert mu.dim() >= 2, f"mu must be at least 2D [*, k, d], got {mu.shape}"
-        if sigma is None:
-            sigma = torch.zeros_like(mu) + 1e-10
-        if weight is None:
-            weight = mu.new_ones((*mu.shape[:-2], 1))
+        sigma = torch.zeros_like(mu) + 1e-10 if sigma is None else torch.tensor(sigma)
+        weight = mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.tensor(weight)
 
         assert (
             mu.shape[:-1] == sigma.shape[:-1] == weight.shape
