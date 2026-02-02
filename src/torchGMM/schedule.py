@@ -10,6 +10,7 @@ class BetaSchedule(torch.nn.Module):
     dX_t = -1/2 * β(t) * X_t dt + √β(t) dW_t
 
     With β(t) = β_min + t(β_max - β_min)
+
     """
 
     def __init__(self, beta_min: float = 0.1, beta_max: float = 20.0):

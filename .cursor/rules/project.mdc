@@ -1,0 +1,16 @@
+---
+description: Core project conventions for torchGMM
+alwaysApply: true
+---
+
+# torchGMM Project
+
+- **Never write try except blocks, the input should unambiguously define the workflow**
+- **Assumptions are the mother of all bad code**
+- **Write concise code, rather refactor to reduce number of lines of code**
+- **Use useful and beautiful abstractions which allow you to reduce code while still be readable and understandable**
+
+- **Package**: `torchGMM` — diffusion on time dependent Gaussian Mixture Models (GMMs). Python ≥3.10, PyTorch ≥2.7.
+- **Layout**: Source in `src/torchGMM/`, tests in `tests/`, notebooks in `notebooks/`. Public API: `TimeDependentGMM`, `Conditional`, `BetaSchedule` (see `src/torchGMM/__init__.py`).
+- **Formatting**: Black (line-length 120), isort (profile black), flake8. Run formatters/linters before committing.
+- **Tensors**: Use shape comments for batch/event dims (e.g. `[..., K, D]`, `[*BS, D]`). Prefer `torch.Tensor` type hints and explicit shape asserts in public APIs.
