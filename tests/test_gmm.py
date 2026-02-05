@@ -149,6 +149,46 @@ class TestShapes:
         with pytest.raises(ValueError, match="t must be of shape"):
             gmm.log_prob(x, t=t_bad)
 
+    @pytest.mark.parametrize(
+        "x_shape, expected_message",
+        [
+            ((50, 5, 4, 3), "x last dim must be"),  # wrong D
+            ((50, 5, 3, 2), "x must have batch dims"),  # wrong batch dims
+        ],
+    )
+    def test_invalid_x_shape_raises(self, x_shape, expected_message):
+        """Invalid x shapes should raise for log_prob and score."""
+        mu = torch.randn(5, 4, 3, 2)
+        sigma = torch.ones(5, 4, 3, 2) * 0.5
+        weight = torch.ones(5, 4, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight)
+        x_bad = torch.randn(*x_shape)
+        with pytest.raises(AssertionError, match=expected_message):
+            gmm.log_prob(x_bad, t=0.5)
+        with pytest.raises(AssertionError, match=expected_message):
+            gmm.score(x_bad, t=0.5)
+
+    def test_invalid_t_shape_raises_for_score(self):
+        """Invalid t shape should raise for score."""
+        mu = torch.randn(5, 4, 3, 2)
+        sigma = torch.ones(5, 4, 3, 2) * 0.5
+        weight = torch.ones(5, 4, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight)
+        x = torch.randn(50, 5, 4, 2)  # [N, B, D], batch_shape=(5, 4)
+        t_bad = torch.rand(5, 2)  # wrong trailing dims; need (5, 4) or (50, 5, 4)
+        with pytest.raises(ValueError, match="t must be of shape"):
+            gmm.score(x, t=t_bad)
+
+    def test_invalid_t_shape_raises_for_sample(self):
+        """Invalid t shape should raise for sample."""
+        mu = torch.randn(5, 4, 3, 2)
+        sigma = torch.ones(5, 4, 3, 2) * 0.5
+        weight = torch.ones(5, 4, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight)
+        t_bad = torch.rand(5, 2)  # wrong batch dims; need (5, 4)
+        with pytest.raises(ValueError, match="t must be of shape"):
+            gmm.sample(shape=None, t=t_bad)
+
     def test_single_batch_dim_dropping(self):
         """Test score output shapes: x [*N,*B,D] -> score [*N,*B,D]."""
         mu1 = torch.randn(1, 5, 2)

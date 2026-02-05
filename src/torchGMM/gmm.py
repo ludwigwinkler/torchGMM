@@ -22,6 +22,7 @@ class TimeDependentGMM(torch.nn.Module):
             mu: [..., k, d] - means for batched GMMs, each with k components and d dimensions
             sigma: [..., k, d] - standard deviations for batched GMMs, each with k components and d dimensions
             weight: [..., k] - mixture weights for batched GMMs, each with k components
+            schedule: Optional BetaSchedule. If not provided, defaults to BetaSchedule(beta_min=0.1, beta_max=20.0).
         """
         assert (mu is not None and sigma is not None and weight is not None) or (
             mu is not None
@@ -47,7 +48,12 @@ class TimeDependentGMM(torch.nn.Module):
             mu.shape[-2] == weight.shape[-1]
         ), f"Number of components must match: mu {mu.shape[-2]}, weight {weight.shape[-1]}"
 
-        weight = weight / weight.sum(dim=-1, keepdim=True)
+        self._validate_positive_tensor("sigma", sigma)
+        self._validate_positive_tensor("weight", weight)
+        weight_sum = weight.sum(dim=-1, keepdim=True)
+        if not torch.all(weight_sum > 0):
+            raise ValueError("weight sum must be > 0 for all batches")
+        weight = weight / weight_sum
         self.register_buffer("mu", mu)
         self.register_buffer("sigma", sigma)
         self.register_buffer("weight", weight)
@@ -71,16 +77,42 @@ class TimeDependentGMM(torch.nn.Module):
             # None initializes to 0.0
             return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * 0.0
         elif not isinstance(t, torch.Tensor):
-            return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * float(t)
+            t_value = float(t)
+            self._validate_time_range(t_value)
+            return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * t_value
         elif t.dim() == 0:
-            return torch.ones(*(sample_shape + self.batch_shape), device=t.device, dtype=t.dtype) * t.item()
+            t_value = t.item()
+            self._validate_time_range(t_value)
+            return torch.ones(*(sample_shape + self.batch_shape), device=t.device, dtype=t.dtype) * t_value
         elif t.shape == sample_shape + self.batch_shape:
+            self._validate_time_range(t)
             return t
-        elif t.shape == self.batch_shape and len(sample_shape) > 0:
+        elif t.shape == self.batch_shape:
+            self._validate_time_range(t)
+            if len(sample_shape) == 0:
+                return t
             return t.expand(sample_shape + self.batch_shape)
         raise ValueError(
             f"t must be of shape {t.shape if isinstance(t, torch.Tensor) else t} must be {sample_shape+self.batch_shape=}, got {t.shape if isinstance(t, torch.Tensor) else t}"
         )
+
+    @staticmethod
+    def _validate_positive_tensor(name: str, tensor: torch.Tensor) -> None:
+        if not torch.all(torch.isfinite(tensor)):
+            raise ValueError(f"{name} must be finite")
+        if not torch.all(tensor > 0):
+            raise ValueError(f"{name} must be > 0")
+
+    @staticmethod
+    def _validate_time_range(t: numbers.Number | torch.Tensor) -> None:
+        if isinstance(t, torch.Tensor):
+            if not torch.all(torch.isfinite(t)):
+                raise ValueError("t must be finite")
+            if not torch.all((t >= 0) & (t <= 1)):
+                raise ValueError("t must be within [0, 1]")
+        else:
+            if not (0 <= t <= 1):
+                raise ValueError("t must be within [0, 1]")
 
     def _gmm_t(self, t: torch.Tensor) -> MixtureSameFamily:
         """Marginal GMM at time t. t: [*N, *B]. Returns MixtureSameFamily with batch_shape=t.shape, event_shape=(D,)."""
@@ -152,7 +184,7 @@ class TimeDependentGMM(torch.nn.Module):
         return TimeDependentGMM(mu_new, sigma_new, weight_new, self.schedule)
 
     def log_prob(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
-        """log_prob(x, t) -> [*N, *B]. x: [*N, *B, D], t: [*B] or [*N, *B] (or scalar)."""
+        """log_prob(x, t) -> [*N, *B]. x: [*N, *B, D], t: scalar or shape x.shape[:-1], with t in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
         assert (
             x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
@@ -167,7 +199,7 @@ class TimeDependentGMM(torch.nn.Module):
         return self.log_prob(x, t)
 
     def energy(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
-        """energy(x, t) -> [*N, *B]. Returns -log_prob(x, t)."""
+        """energy(x, t) -> [*N, *B]. Returns -log_prob(x, t). t: scalar or shape x.shape[:-1] in [0, 1]."""
         return -self.log_prob(x, t)
 
     def cdf(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
@@ -196,7 +228,7 @@ class TimeDependentGMM(torch.nn.Module):
 
     @torch.enable_grad()
     def score(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
-        """score(x, t) -> [*N, *B, D]. ∇_x log p(x). x: [*N, *B, D], t: [*B] or [*N, *B] (or scalar)."""
+        """score(x, t) -> [*N, *B, D]. ∇_x log p(x). x: [*N, *B, D], t: scalar or shape x.shape[:-1] in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
         assert (
             x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
@@ -210,7 +242,7 @@ class TimeDependentGMM(torch.nn.Module):
         return score
 
     def sample(self, shape: tuple | int | None = None, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
-        """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: [*N,*B] or scalar (broadcast)."""
+        """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: scalar or shape [*N,*B] in [0, 1]."""
         if shape is None:
             sample_shape = ()
         elif isinstance(shape, int):
@@ -230,26 +262,7 @@ class TimeDependentGMM(torch.nn.Module):
         return f"TimeDependentGMM(mu={self.mu.shape}, sigma={self.sigma.shape}, weight={self.weight.shape})"
 
 
-class Conditional(TimeDependentGMM):
-    """
-    Conditional Process class
-    Instead of simulating the full GMM, we only simulate the conditional process conditioned on the initial value x0.
-    This is useful for conditional sampling and inference.
-
-    Args:
-        x0: [..., d] - initial value
-        schedule: BetaSchedule - schedule for the conditional process
-
-    Returns:
-        Conditional - Conditional process
-    """
-
-    def __init__(self, x0: torch.Tensor, schedule: BetaSchedule = None):
-        mu = x0.unsqueeze(-2)  # [..., d] -> [..., 1, d]
-        assert mu.dim() == x0.dim() + 1, f"mu must be a tensor [..., 1, d], got {mu.shape}"
-        sigma = torch.zeros_like(mu) + 1e-10
-        weight = mu.new_ones((*mu.shape[:-2], 1))
-        super().__init__(mu, sigma, weight, schedule)
+from torchGMM.conditional import Conditional
 
 
 if __name__ == "__main__":

@@ -30,7 +30,18 @@ def forward_diffusion(
         t: [T] for the time steps to simulate the diffusion
     """
 
-    assert t.dim() == 1
+    if t.dim() != 1:
+        raise ValueError(f"t must be 1D, got {t.shape}")
+    if not torch.all(torch.isfinite(t)):
+        raise ValueError("t must be finite")
+    if not torch.all((t >= 0) & (t <= 1)):
+        raise ValueError("t must be within [0, 1]")
+    if t.numel() < 2:
+        raise ValueError("t must contain at least two time points")
+    if not torch.all(t[1:] > t[:-1]):
+        raise ValueError("t must be strictly increasing for forward diffusion")
+    if not torch.is_tensor(x):
+        raise ValueError("x must be a torch.Tensor")
     trajectory = [x.clone()]
     dt_ = t[1:] - t[:-1]  # t_{k+1} - t_k
     for t_, dt_ in zip(t[:-1], dt_):
@@ -66,7 +77,18 @@ def reverse_diffusion(
     dX_t = [1/2 * β(t) * X_t + β(t) * ∇_x log p_t(x)] dt + √β(t) dW_t
     """
 
-    assert t.dim() == 1
+    if t.dim() != 1:
+        raise ValueError(f"t must be 1D, got {t.shape}")
+    if not torch.all(torch.isfinite(t)):
+        raise ValueError("t must be finite")
+    if not torch.all((t >= 0) & (t <= 1)):
+        raise ValueError("t must be within [0, 1]")
+    if t.numel() < 2:
+        raise ValueError("t must contain at least two time points")
+    if not torch.all(t[1:] < t[:-1]):
+        raise ValueError("t must be strictly decreasing for reverse diffusion")
+    if not torch.is_tensor(x):
+        raise ValueError("x must be a torch.Tensor")
     trajectory = [x.clone()]
     dt_ = t[1:] - t[:-1]  # t_{k+1} - t_k
     for t_, dt_ in zip(t[:-1], dt_):
@@ -93,6 +115,47 @@ def reverse_diffusion(
         *x.shape,
     ), f"trajectory_tensor.shape: {trajectory_tensor.shape}, x.shape: {x.shape}"
     return trajectory_tensor
+
+
+def reverse_step(
+    schedule: torch.nn.Module,
+    score_fn: callable,
+    x: torch.Tensor,
+    t: torch.Tensor | float,
+    t_prev: torch.Tensor | float,
+) -> torch.Tensor:
+    """
+    Single reverse diffusion step from time t to earlier time t_prev.
+
+    Args:
+        schedule: Schedule with beta(t)
+        score_fn: Callable returning score(x, t)
+        x: Current samples [*B, D]
+        t: Current time (scalar) in [0, 1]
+        t_prev: Earlier time (scalar) in [0, 1] with t_prev < t
+    """
+    t_tensor = torch.as_tensor(t, device=x.device, dtype=x.dtype)
+    t_prev_tensor = torch.as_tensor(t_prev, device=x.device, dtype=x.dtype)
+    if t_tensor.dim() != 0 or t_prev_tensor.dim() != 0:
+        raise ValueError("t and t_prev must be scalars")
+    if not torch.all(torch.isfinite(t_tensor)) or not torch.all(torch.isfinite(t_prev_tensor)):
+        raise ValueError("t and t_prev must be finite")
+    if not torch.all((t_tensor >= 0) & (t_tensor <= 1)):
+        raise ValueError("t must be within [0, 1]")
+    if not torch.all((t_prev_tensor >= 0) & (t_prev_tensor <= 1)):
+        raise ValueError("t_prev must be within [0, 1]")
+    if not torch.all(t_prev_tensor < t_tensor):
+        raise ValueError("t_prev must be less than t")
+
+    dt = t_prev_tensor - t_tensor
+    beta_t = schedule.beta(t_tensor)
+    diffusion = torch.sqrt(beta_t)
+    score = score_fn(x, t_tensor)
+    if x.shape != score.shape:
+        raise ValueError(f"x and score must have the same shape, got {x.shape} and {score.shape}")
+    drift = -0.5 * beta_t * x - diffusion**2 * score
+    noise = torch.randn_like(x, device=x.device)
+    return x + drift * dt + diffusion * torch.sqrt(dt.abs()) * noise
 
 
 def compute_ess_from_log_weights(log_weight: torch.Tensor, n_particles: int) -> tuple[torch.Tensor, torch.Tensor]:

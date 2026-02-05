@@ -1,3 +1,3 @@
 from .gmm import TimeDependentGMM, Conditional
 from .schedule import BetaSchedule
-from .diffusion import forward_diffusion, reverse_diffusion
+from .diffusion import forward_diffusion, reverse_diffusion, reverse_step
