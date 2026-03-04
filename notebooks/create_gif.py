@@ -17,17 +17,18 @@ import matplotlib.gridspec as gridspec
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.stats import norm
 from pathlib import Path
-
 from torchGMM import TimeDependentGMM, BetaSchedule, forward_diffusion, reverse_diffusion
 
 # ---------------------------------------------------------------------------
 # Use LaTeX fonts
 # ---------------------------------------------------------------------------
-plt.rcParams.update({
-    "text.usetex": True,
-    "font.family": "serif",
-    "font.serif": ["Computer Modern Roman"],
-})
+plt.rcParams.update(
+    {
+        "text.usetex": True,
+        "font.family": "serif",
+        "font.serif": ["Computer Modern Roman"],
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -108,8 +109,8 @@ fig = plt.figure(figsize=(12, 4.5), dpi=DPI)
 fig.patch.set_facecolor("white")
 gs = gridspec.GridSpec(1, 3, width_ratios=[1, 8, 1], wspace=0.05)
 
-ax_left = fig.add_subplot(gs[0])   # noise density
-ax_main = fig.add_subplot(gs[1])   # trajectories
+ax_left = fig.add_subplot(gs[0])  # noise density
+ax_main = fig.add_subplot(gs[1])  # trajectories
 ax_right = fig.add_subplot(gs[2])  # data density
 
 # --- Main axis ---
@@ -187,4 +188,3 @@ anim.save(str(GIF_PATH), writer=PillowWriter(fps=FPS), dpi=DPI)
 plt.close(fig)
 
 print(f"GIF saved to {GIF_PATH}  ({N_FRAMES} frames, {N_FRAMES / FPS:.1f}s)")
-
