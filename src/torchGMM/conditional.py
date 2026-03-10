@@ -18,6 +18,7 @@ class Conditional(TimeDependentGMM):
 	"""
 
 	def __init__(self, x0: torch.Tensor, schedule: BetaSchedule = None):
+		assert torch.isfinite(x0).all(), f"x0 must contain only finite values, got {x0}"
 		mu = x0.unsqueeze(-2)  # [..., d] -> [..., 1, d]
 		assert mu.dim() == x0.dim() + 1, f"mu must be a tensor [..., 1, d], got {mu.shape}"
 		sigma = torch.zeros_like(mu) + 1e-10

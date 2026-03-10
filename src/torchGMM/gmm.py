@@ -236,9 +236,8 @@ class TimeDependentGMM(torch.nn.Module):
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
-        x = x.requires_grad_(True)
-        score = torch.autograd.grad(self._gmm_t(t_exp).log_prob(x).sum(), x, create_graph=False)[0].detach()
-        x = x.detach().requires_grad_(False)
+        x_grad = x.detach().clone().requires_grad_(True)
+        score = torch.autograd.grad(self._gmm_t(t_exp).log_prob(x_grad).sum(), x_grad, create_graph=False)[0].detach()
         return score
 
     def sample(self, shape: tuple | int | None = None, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:

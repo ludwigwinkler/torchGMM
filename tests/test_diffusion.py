@@ -30,7 +30,7 @@ def gmm_model():
     """Fixture for the GMM model used in diffusion tests."""
     mu = torch.tensor([-2, 0, 2]).reshape(1, 3, 1)
     sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
-    weight = torch.tensor([0.33, 0.5, 0.1]).reshape(1, 3)
+    weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
     return TimeDependentGMM(mu=mu, sigma=sigma, weight=weight)
 
 
@@ -39,7 +39,7 @@ def batched_gmm_model():
     """Fixture for the GMM model used in diffusion tests."""
     mu = torch.tensor([[-1, 0.5, 1.5], [-2, 0, 2]]).reshape(2, 3, 1)
     sigma = torch.tensor([[0.3, 0.3, 0.2], [0.3, 0.3, 0.2]]).reshape(2, 3, 1)
-    weight = torch.tensor([[0.2, 0.3, 0.1], [0.33, 0.5, 0.1]]).reshape(2, 3)
+    weight = torch.tensor([[1/3, 1/2, 1/6], [0.33, 0.5, 0.17]]).reshape(2, 3)
     return TimeDependentGMM(mu=mu, sigma=sigma, weight=weight)
 
 
