@@ -11,6 +11,7 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+from _utils import plt_show
 
 from torchGMM import TimeDependentGMM, FlowMatchingSchedule, BetaSchedule
 from torchGMM.diffusion import reverse_sampling
@@ -84,7 +85,7 @@ axes[1].grid(True, alpha=0.3)
 
 fig.suptitle("Flow Matching on a 1D GMM", fontsize=14, y=1.01)
 plt.tight_layout()
-plt.show()
+plt_show()
 
 # %%[markdown]
 # ## Compare schedule coefficients: VP-SDE vs Flow Matching
@@ -120,7 +121,7 @@ axes[2].legend()
 axes[2].grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.show()
+plt_show()
 
 # %%[markdown]
 # ## ODE sampling: integrate dx/dt = v_t(x) from t=1 → t=0.05
@@ -188,7 +189,7 @@ ax2.set_title("Final distribution", fontsize=13)
 ax2.legend(fontsize=9)
 ax2.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.show()
+plt_show()
 
 # %%[markdown]
 # ## Stochastic sampler: reverse SDE trajectories
@@ -275,7 +276,7 @@ ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
 # plt.savefig("notebooks/flow_matching_sde_trajectories.png", dpi=150, bbox_inches="tight")
-plt.show()
+plt_show()
 
 # %%[markdown]
 # ## Combined: ODE vs SDE trajectories
@@ -336,4 +337,4 @@ ax2.legend(fontsize=9)
 ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.show()
+plt_show()

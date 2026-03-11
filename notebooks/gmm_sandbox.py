@@ -1,6 +1,7 @@
 import torch
 from torchGMM import TimeDependentGMM
 from matplotlib import pyplot as plt
+from _utils import plt_show
 
 
 
@@ -22,7 +23,7 @@ for t in torch.linspace(0., 1.0, 11):
             axs[bs].set_xlim(-5, 5)
             axs[bs].set_ylim(0, 0.5)
     fig.suptitle(f't={t:.2f}')
-    plt.show()
+    plt_show()
 
 
 #%%
@@ -44,4 +45,4 @@ if False:
                 axs[bs, d].set_xlim(-5, 5)
                 axs[bs, d].set_ylim(0, 0.5)
         fig.suptitle(f't={t:.2f}')
-        plt.show()
+        plt_show()
