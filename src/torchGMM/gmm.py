@@ -2,7 +2,7 @@ import torch
 import einops
 import numbers
 from torch.distributions import MultivariateNormal, Normal, MixtureSameFamily, Categorical
-from torchGMM.schedule import BetaSchedule
+from torchGMM.schedule import Schedule, BetaSchedule, FlowMatchingSchedule
 
 """
 TimeDependentGMM: GMM with params [*B, K, D]. Two shapes only:
@@ -14,7 +14,7 @@ TimeDependentGMM: GMM with params [*B, K, D]. Two shapes only:
 
 class TimeDependentGMM(torch.nn.Module):
     def __init__(
-        self, mu: torch.Tensor, sigma: torch.Tensor = None, weight: torch.Tensor = None, schedule: BetaSchedule = None
+        self, mu: torch.Tensor, sigma: torch.Tensor = None, weight: torch.Tensor = None, schedule: Schedule = None
     ):
         super().__init__()
         """
@@ -22,7 +22,7 @@ class TimeDependentGMM(torch.nn.Module):
             mu: [..., k, d] - means for batched GMMs, each with k components and d dimensions
             sigma: [..., k, d] - standard deviations for batched GMMs, each with k components and d dimensions
             weight: [..., k] - mixture weights for batched GMMs, each with k components
-            schedule: Optional BetaSchedule. If not provided, defaults to BetaSchedule(beta_min=0.1, beta_max=20.0).
+            schedule: Optional Schedule. If not provided, defaults to BetaSchedule(beta_min=0.1, beta_max=20.0).
         """
         assert (mu is not None and sigma is not None and weight is not None) or (
             mu is not None
@@ -69,7 +69,7 @@ class TimeDependentGMM(torch.nn.Module):
         self.batch_shape = self.batch_shape
         self.event_shape = (self.dim,)  # [Dim]
 
-        self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if not schedule else schedule
+        self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if schedule is None else schedule
 
     def _expand_t(self, t: numbers.Number | torch.Tensor | None, sample_shape: tuple) -> torch.Tensor:
         """Return t with shape [*sample_shape, *batch_shape]. Accept t scalar, [*B], or [*N,*B]."""
