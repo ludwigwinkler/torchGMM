@@ -1,3 +1,3 @@
-from .gmm import TimeDependentGMM, Conditional
-from .schedule import Schedule, BetaSchedule, FlowMatchingSchedule
-from .diffusion import forward_diffusion, reverse_diffusion, reverse_step
+from .diffusion import forward_sampling, reverse_sampling
+from .gmm import Conditional, TimeDependentGMM
+from .schedule import BetaSchedule, FlowMatchingSchedule, Schedule

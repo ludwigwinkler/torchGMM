@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from torchGMM import TimeDependentGMM, FlowMatchingSchedule, BetaSchedule
+from torchGMM.diffusion import reverse_sampling
 
 torch.manual_seed(42)
 
@@ -36,7 +37,8 @@ gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 # %%
 def velocity_from_score(gmm: TimeDependentGMM, x: torch.Tensor, t: float) -> torch.Tensor:
-    """Compute marginal velocity v_t(x) from the exact score for the flow matching schedule."""
+    """Compute marginal velocity v_t(x) from the exact score for the flow matching schedule.
+    Note: gmm.velocity(x, t) computes this for any schedule. This is kept for illustration."""
     s = gmm.score(x, t)  # [N, B, D]
     return -x / (1 - t) - t / (1 - t) * s
 
@@ -136,17 +138,9 @@ x0_noise = torch.randn(n_samples, 1, 1)  # [N, B=1, D=1]
 # Time grid from t=1 down to t_min
 t_ode = torch.linspace(1.0 - 1e-4, t_min, n_steps)
 
-# Euler integration of the ODE
-x = x0_noise.clone()
-trajectory = [x.squeeze().detach().clone()]  # [N]
-
-for i in range(len(t_ode) - 1):
-    dt = t_ode[i + 1] - t_ode[i]  # negative
-    v = velocity_from_score(gmm, x, t=t_ode[i].item())
-    x = x + v * dt
-    trajectory.append(x.squeeze().detach().clone())
-
-trajectory = torch.stack(trajectory)  # [n_steps, N]
+# ODE integration: dx/dt = v_t(x), no noise
+traj_full = reverse_sampling(gmm.velocity, None, x0_noise, t_ode)  # [T, N, B=1, D=1]
+trajectory = traj_full[:, :, 0, 0]  # [T, N]
 
 # %%[markdown]
 # ## Plot trajectories over time with target density
@@ -219,27 +213,22 @@ def gamma_t(t: float, gamma_min: float = gamma_min, gamma_max: float = gamma_max
 t_sde = torch.linspace(1.0 - 1e-4, t_min, n_steps)
 
 x_sde = torch.randn(n_samples, 1, 1)  # initial noise
-traj_sde = [x_sde.squeeze().detach().clone()]
 
-base_g = 1.0
 
-for i in range(len(t_sde) - 1):
-    t_curr = t_sde[i].item()
-    dt = t_sde[i + 1] - t_sde[i]  # negative
+# dx = [v_t(x) - ½γ(t)²·s_t(x)] dt + γ(t) dW
+def sde_drift(x_, t_):
+    v = gmm.velocity(x_, t_)
+    score = gmm.score(x_, t_)
+    gamma = gamma_t(t_.item())
+    return v - 0.5 * gamma**2 * score
 
-    v = velocity_from_score(gmm, x_sde, t=t_curr)
-    score = gmm.score(x_sde, t=t_curr)
-    gamma = gamma_t(t_curr)
-    # gamma = 2
 
-    # dx = [v_t(x) - ½γ(t)²·s_t(x)] dt + γ(t) dW
-    drift = v - 0.5 * gamma**2 * score
-    noise = torch.randn_like(x_sde)
+def sde_diffusion(t_):
+    return torch.tensor(gamma_t(t_.item()))
 
-    x_sde = x_sde + drift * dt + gamma * torch.sqrt(dt.abs()) * noise
-    traj_sde.append(x_sde.squeeze().detach().clone())
 
-traj_sde = torch.stack(traj_sde)  # [n_steps, N]
+traj_sde_full = reverse_sampling(sde_drift, sde_diffusion, x_sde, t_sde)  # [T, N, B=1, D=1]
+traj_sde = traj_sde_full[:, :, 0, 0]  # [T, N]
 
 # %%[markdown]
 # ## Plot stochastic trajectories with target density

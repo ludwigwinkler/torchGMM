@@ -31,6 +31,19 @@ class Schedule(torch.nn.Module):
         """Time derivative dσ_t/dt — needed for velocity computation."""
         raise NotImplementedError
 
+    def forward_drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Forward SDE drift f(x,t) = (α̇_t / α_t) x."""
+        return (self.get_dalpha_dt(t) / self.get_alpha_t(t)).unsqueeze(-1) * x
+
+    def diffusion_coeff(self, t: torch.Tensor) -> torch.Tensor:
+        """Forward SDE diffusion g(t) where g²(t) = 2(σ̇_t σ_t − α̇_t σ_t² / α_t)."""
+        alpha_t = self.get_alpha_t(t)
+        sigma_t = self.get_sigma_t(t)
+        dalpha_dt = self.get_dalpha_dt(t)
+        dsigma_dt = self.get_dsigma_dt(t)
+        g_sq = 2 * (dsigma_dt * sigma_t - dalpha_dt * sigma_t**2 / alpha_t)
+        return torch.sqrt(g_sq)
+
 
 class BetaSchedule(Schedule):
     """
@@ -82,6 +95,14 @@ class BetaSchedule(Schedule):
         """Signal and noise coefficients: (α_t, σ_t)"""
         return self.get_alpha_t(t), self.get_sigma_t(t)
 
+    def forward_drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """f(x,t) = -½ β(t) x"""
+        return -0.5 * self.beta(t) * x
+
+    def diffusion_coeff(self, t: torch.Tensor) -> torch.Tensor:
+        """g(t) = √β(t)"""
+        return torch.sqrt(self.beta(t))
+
     def get_t_from_lambda(self, lambda_t: torch.Tensor) -> torch.Tensor:
         """Used by DPMsolver. The formula comes from Section D.4 of the DPMsolver paper."""
         log_exp = 2 * torch.log(1 + torch.exp(-2 * lambda_t))
@@ -114,3 +135,11 @@ class FlowMatchingSchedule(Schedule):
     def get_dsigma_dt(self, t: torch.Tensor) -> torch.Tensor:
         """dσ_t/dt = 1"""
         return torch.ones_like(t)
+
+    def forward_drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """f(x,t) = -x / (1 − t)"""
+        return -x / (1 - t).unsqueeze(-1)
+
+    def diffusion_coeff(self, t: torch.Tensor) -> torch.Tensor:
+        """g(t) = √(2t / (1 − t))"""
+        return torch.sqrt(2 * t / (1 - t))

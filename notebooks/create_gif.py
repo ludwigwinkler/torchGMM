@@ -17,7 +17,7 @@ import matplotlib.gridspec as gridspec
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.stats import norm
 from pathlib import Path
-from torchGMM import TimeDependentGMM, BetaSchedule, forward_diffusion, reverse_diffusion
+from torchGMM import TimeDependentGMM, BetaSchedule, forward_sampling, reverse_sampling
 
 # ---------------------------------------------------------------------------
 # Use LaTeX fonts
@@ -59,7 +59,7 @@ gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
 print("Simulating forward diffusion ...")
 t_fwd = torch.linspace(0, 1, N_STEPS)
 x0 = gmm.sample(N_SAMPLES)  # [N, 1, 1]
-traj_fwd = forward_diffusion(schedule, x0, t_fwd)  # [T, N, 1, 1]
+traj_fwd = forward_sampling(schedule.forward_drift, schedule.diffusion_coeff, x0, t_fwd)  # [T, N, 1, 1]
 
 # ---------------------------------------------------------------------------
 # Reverse diffusion  (t: 1 → 0,  noise → data)
@@ -67,7 +67,15 @@ traj_fwd = forward_diffusion(schedule, x0, t_fwd)  # [T, N, 1, 1]
 print("Simulating reverse diffusion ...")
 t_rev = torch.linspace(1, 0, N_STEPS)
 x_noise = torch.randn_like(x0)
-traj_rev = reverse_diffusion(schedule, gmm.score, x_noise, t_rev)  # [T, N, 1, 1]
+
+
+def reverse_drift(x_, t_):
+    f = schedule.forward_drift(x_, t_)
+    g = schedule.diffusion_coeff(t_)
+    return f - g**2 * gmm.score(x_, t_)
+
+
+traj_rev = reverse_sampling(reverse_drift, schedule.diffusion_coeff, x_noise, t_rev)  # [T, N, 1, 1]
 
 # Squeeze to [T, N]
 traj_fwd_np = traj_fwd[:, :, 0, 0].detach().numpy()

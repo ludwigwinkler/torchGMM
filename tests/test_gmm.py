@@ -1,11 +1,11 @@
 import sys
 
+import einops
 import pytest
 import torch
-import einops
 
-from torchGMM.gmm import TimeDependentGMM, Conditional
-from torchGMM.schedule import BetaSchedule
+from torchGMM.gmm import Conditional, TimeDependentGMM
+from torchGMM.schedule import BetaSchedule, FlowMatchingSchedule
 
 
 def get_local_device():
@@ -452,6 +452,74 @@ class TestConditional:
         assert score.shape == (11, 10, 2), f"Expected (11, 10, 2), got {score.shape}"
         energy = cond_gmm.energy(x, t=0.0)
         assert energy.shape == (11, 10), f"Expected (11, 10), got {energy.shape}"
+
+
+class TestVelocity:
+    """Test velocity computation on TimeDependentGMM"""
+
+    @pytest.mark.parametrize(
+        "x_shape, t, expected_shape",
+        [
+            ((50, 5, 4, 2), 0.5, (50, 5, 4, 2)),
+            ((5, 4, 2), 0.5, (5, 4, 2)),
+            ((5, 10, 5, 4, 2), 0.5, (5, 10, 5, 4, 2)),
+        ],
+    )
+    def test_velocity_shapes(self, x_shape, t, expected_shape):
+        """Test velocity(x, t) output shapes match score shapes."""
+        mu = torch.randn(5, 4, 3, 2)
+        sigma = torch.ones(5, 4, 3, 2) * 0.5
+        weight = torch.ones(5, 4, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight)
+        x = torch.randn(*x_shape)
+        v = gmm.velocity(x, t=t)
+        assert v.shape == expected_shape, f"Expected {expected_shape}, got {v.shape}"
+
+    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, FlowMatchingSchedule])
+    def test_score_velocity_consistency(self, schedule_cls):
+        """Verify v = (dα/dt / α) x + (dσ/dt - dα/dt σ/α) σ score for both schedules."""
+        schedule = schedule_cls() if schedule_cls == FlowMatchingSchedule else schedule_cls(beta_min=0.1, beta_max=20.0)
+        mu = torch.randn(1, 3, 2)
+        sigma = torch.ones(1, 3, 2) * 0.5
+        weight = torch.ones(1, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
+
+        t_val = 0.5
+        x = torch.randn(20, 1, 2)
+        v = gmm.velocity(x, t=t_val)
+
+        # Manually compute velocity from score
+        t_tensor = torch.full((20, 1), t_val)
+        alpha_t = schedule.get_alpha_t(t_tensor)
+        sigma_t = schedule.get_sigma_t(t_tensor)
+        dalpha_dt = schedule.get_dalpha_dt(t_tensor)
+        dsigma_dt = schedule.get_dsigma_dt(t_tensor)
+        score = gmm.score(x, t=t_val)
+
+        coeff_x = (dalpha_dt / alpha_t).unsqueeze(-1)
+        coeff_score = ((dalpha_dt * sigma_t / alpha_t - dsigma_dt) * sigma_t).unsqueeze(-1)
+        v_expected = coeff_x * x + coeff_score * score
+
+        torch.testing.assert_close(v, v_expected, atol=1e-5, rtol=1e-4)
+
+    def test_flow_matching_velocity_formula(self):
+        """For flow matching (α=1-t, σ=t): v = (-x + σ² score) / 1 = -x + t² score + ... simplified."""
+        schedule = FlowMatchingSchedule()
+        mu = torch.randn(1, 3, 2)
+        sigma = torch.ones(1, 3, 2) * 0.5
+        weight = torch.ones(1, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
+
+        t_val = 0.4
+        x = torch.randn(20, 1, 2)
+        v = gmm.velocity(x, t=t_val)
+
+        # For flow matching: dα/dt = -1, dσ/dt = 1, α = 1-t, σ = t
+        # v = -x/(1-t) + (-t/(1-t) - 1) * t * score = -(x + t score)/(1-t)
+        score = gmm.score(x, t=t_val)
+        v_expected = -(x + t_val * score) / (1 - t_val)
+
+        torch.testing.assert_close(v, v_expected, atol=1e-5, rtol=1e-4)
 
 
 class TestDeviceHandling:

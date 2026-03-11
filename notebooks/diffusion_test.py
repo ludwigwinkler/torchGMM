@@ -1,5 +1,5 @@
 import torch
-from torchGMM.diffusion import forward_diffusion, reverse_diffusion
+from torchGMM.diffusion import forward_sampling, reverse_sampling
 from torchGMM.gmm import TimeDependentGMM
 from torchGMM.schedule import BetaSchedule
 import matplotlib.pyplot as plt
@@ -13,7 +13,7 @@ gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight)
 
 x = gmm.sample(shape=500, t=0.0)[:, 0, :]  # [N, D] for forward_diffusion
 t = torch.linspace(0.00, 1.0, 100)
-trajectory = forward_diffusion(schedule, x, t)
+trajectory = forward_sampling(schedule.forward_drift, schedule.diffusion_coeff, x, t)
 
 
 # Trajectory: [n_steps+1, n_samples, 1]
@@ -32,7 +32,15 @@ x = torch.randn(1000, 1, 1)  # [N, B=1, D=1]
 t = torch.linspace(1.0, 0.00, 100)
 x_grid = torch.linspace(-5, 5, 100).reshape(-1, 1, 1)  # [N, B=1, D=1]
 target_dist = gmm.log_prob(x_grid, t=0.0).exp().squeeze(-1)  # [N]
-trajectory = reverse_diffusion(schedule, lambda x_xt, t_xt: gmm.score(x_xt, t_xt), x, t).detach()
+
+
+def reverse_drift(x_, t_):
+    f = schedule.forward_drift(x_, t_)
+    g = schedule.diffusion_coeff(t_)
+    return f - g**2 * gmm.score(x_, t_)
+
+
+trajectory = reverse_sampling(reverse_drift, schedule.diffusion_coeff, x, t).detach()
 print(trajectory.shape)
 
 # Visualize some example trajectories for a subset of particles
