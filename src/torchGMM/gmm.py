@@ -16,7 +16,11 @@ TimeDependentGMM: GMM with params [*B, K, D]. Two shapes only:
 
 class TimeDependentGMM(torch.nn.Module):
     def __init__(
-        self, mu: torch.Tensor, sigma: torch.Tensor = None, weight: torch.Tensor = None, schedule: Schedule = None
+        self,
+        mu: torch.Tensor,
+        sigma: torch.Tensor | None = None,
+        weight: torch.Tensor | None = None,
+        schedule: Schedule | None = None,
     ):
         super().__init__()
         """

@@ -224,7 +224,7 @@ class TestDistribution:
         alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(torch.scalar_tensor(t))
         # Compute the true mean and variance of the forward process [batch=4,component=1,dim=2) -> x0=[batch=4,dim=2]
         true_mean = alpha_t * mu.squeeze(1)
-        true_std = (sigma_t**2 + alpha_t * sigma.squeeze(1) ** 2) ** 0.5 * torch.ones_like(mu).squeeze(1)
+        true_std = (sigma_t**2 + alpha_t**2 * sigma.squeeze(1) ** 2) ** 0.5 * torch.ones_like(mu).squeeze(1)
         # Create Conditional GMM and GMM with the same parameters and sample from them
 
         gmm_samples = gmm.sample(shape=1_000_000, t=t)  # [1_000_000, BS=4, Dim=2]
@@ -255,7 +255,7 @@ class TestDistribution:
         t_scalar = torch.scalar_tensor(t)
         alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(t_scalar)
         true_mean = alpha_t * mu.squeeze(1)  # [BS, Dim]
-        true_std = (sigma_t**2 + alpha_t * sigma.squeeze(1) ** 2) ** 0.5 * torch.ones_like(mu).squeeze(1)
+        true_std = (sigma_t**2 + alpha_t**2 * sigma.squeeze(1) ** 2) ** 0.5 * torch.ones_like(mu).squeeze(1)
 
         # Sample: [50, BS, Dim]
         gmm_samples = gmm.sample(shape=50, t=t)
@@ -318,7 +318,7 @@ class TestGMMProperties:
         torch.testing.assert_close(score, grad, atol=1e-5, rtol=1e-4)
 
 
-class TestMarginalDistributions:
+class Test2DMarginalizedDistributions:
     """Test marginal distribution extraction from TimeDependentGMM"""
 
     def test_marginal_2d_empirical_comparison(self):
@@ -394,34 +394,44 @@ class TestTemperatureSampling:
                 temperature_prob, tempered_prob, atol=0.01, rtol=0.1, msg=f"Temperature: {temperature}"
             )
 
-    def test_temperature_sampling(self):
+    def test_temperature_importance_sampling(self):
         """
-        Test importance sampling from a tempered GMM
-        We're sampling with weights
-        1. w = p^beta / p = p^(beta - 1)
-        2. w = w / sum_j w_j
-        3. multinomial(w)
-
-        Only valid for a 1D Gaussian
+        Test importance sampling from a tempered GMM.
+        Samples from p(x), reweights by w ∝ p(x)^(β-1), then resamples.
+        The resulting histogram should match the tempered GMM N(mu, sigma²/β).
         """
+        torch.manual_seed(0)
         mu = torch.randn(1, 1, 1)
         sigma = torch.ones(1, 1, 1) * 0.5
         weight = torch.ones(1, 1)
         gmm = TimeDependentGMM(mu, sigma, weight)
-        for temperature in [0.01, 0.1, 0.5, 1.0, 2.0, 5.0]:
+
+        for temperature in [0.5, 1.0, 2.0]:
             temperature_gmm = TimeDependentGMM(mu, sigma / temperature**0.5, weight)
-            # Build a one dimensional meshgrid with points
-            x_min, x_max, n_points = -3.0, 3.0, 100
-            x_grid = torch.linspace(x_min, x_max, n_points)
-            mesh_points = x_grid.unsqueeze(-1).unsqueeze(-1)  # [N, 1, 1]
-            log_prob = gmm.log_prob(mesh_points, t=0.0)
-            tempered_log_prob = temperature * log_prob
-            temperature_log_prob = temperature_gmm.log_prob(mesh_points, t=0.0)
-            prob = torch.exp(log_prob) / torch.exp(log_prob).sum()
-            tempered_prob = torch.exp(tempered_log_prob) / torch.exp(tempered_log_prob).sum()
-            temperature_prob = torch.exp(temperature_log_prob) / torch.exp(temperature_log_prob).sum()
-            torch.testing.assert_close(
-                temperature_prob, tempered_prob, atol=0.01, rtol=0.1, msg=f"Temperature: {temperature}"
+
+            # Sample from p, reweight by p^(β-1), resample
+            n_particles = 100_000
+            samples = gmm.sample(shape=n_particles, t=0.0)  # [N, 1, 1]
+            log_p = gmm.log_prob(samples, t=0.0)  # [N, 1]
+            log_w = (temperature - 1) * log_p  # [N, 1]
+            log_w = log_w - log_w.max(dim=0).values  # stabilise
+            w = log_w.exp()
+            w = w / w.sum(dim=0)  # normalise per batch
+            idx = torch.multinomial(w[:, 0], n_particles, replacement=True)
+            resampled = samples[idx, 0, 0]  # [N]
+
+            # Compare histogram of resampled to tempered GMM density
+            x_grid = torch.linspace(-3.0, 3.0, 100).reshape(-1, 1, 1)
+            bin_edges = torch.linspace(-3.0, 3.0, 51)
+            hist, _ = torch.histogram(resampled, bins=bin_edges, density=True)
+            target = temperature_gmm.log_prob(x_grid, t=0.0).exp().squeeze()
+            # Evaluate target at bin centres
+            bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:]).reshape(-1, 1, 1)
+            target_bins = temperature_gmm.log_prob(bin_centers, t=0.0).exp().squeeze()
+            assert (
+                hist - target_bins
+            ).abs().max() < 0.05, (
+                f"IS resample @ temp={temperature}: max deviation {(hist - target_bins).abs().max():.3f}"
             )
 
 
@@ -477,7 +487,7 @@ class TestVelocity:
 
     @pytest.mark.parametrize("schedule_cls", [BetaSchedule, FlowMatchingSchedule])
     def test_score_velocity_consistency(self, schedule_cls):
-        """Verify v = (dα/dt / α) x + (dσ/dt - dα/dt σ/α) σ score for both schedules."""
+        """Verify v = (dα/dt / α) x + (dα/dt σ/α - dσ/dt) σ score for both schedules — the Tweedie velocity formula."""
         schedule = schedule_cls() if schedule_cls == FlowMatchingSchedule else schedule_cls(beta_min=0.1, beta_max=20.0)
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
@@ -503,7 +513,13 @@ class TestVelocity:
         torch.testing.assert_close(v, v_expected, atol=1e-5, rtol=1e-4)
 
     def test_flow_matching_velocity_formula(self):
-        """For flow matching (α=1-t, σ=t): v = (-x + σ² score) / 1 = -x + t² score + ... simplified."""
+        """For flow matching (α=1-t, σ=t): v = -(x + t·score) / (1-t).
+
+        Derivation: dα/dt=-1, dσ/dt=1, α=1-t, σ=t
+          coeff_x = dα/dt / α = -1/(1-t)
+          coeff_score = (dα/dt·σ/α - dσ/dt)·σ = (-t/(1-t) - 1)·t = -t/(1-t)
+          v = -x/(1-t) - t·score/(1-t) = -(x + t·score)/(1-t)
+        """
         schedule = FlowMatchingSchedule()
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
@@ -514,10 +530,33 @@ class TestVelocity:
         x = torch.randn(20, 1, 2)
         v = gmm.velocity(x, t=t_val)
 
-        # For flow matching: dα/dt = -1, dσ/dt = 1, α = 1-t, σ = t
-        # v = -x/(1-t) + (-t/(1-t) - 1) * t * score = -(x + t score)/(1-t)
         score = gmm.score(x, t=t_val)
         v_expected = -(x + t_val * score) / (1 - t_val)
+
+        torch.testing.assert_close(v, v_expected, atol=1e-5, rtol=1e-4)
+
+    def test_beta_schedule_velocity_formula(self):
+        """For BetaSchedule VP-SDE (α²+σ²=1): v = -½β(t)·(x + score).
+
+        Derivation: dα/dt=-½β·α, dσ/dt=½β·α²/σ
+          coeff_x = dα/dt / α = -½β
+          coeff_score = (dα/dt·σ/α - dσ/dt)·σ = (-½β·σ - ½β·α²/σ)·σ = -½β·(σ²+α²) = -½β  (VP: α²+σ²=1)
+          v = -½β·x - ½β·score = -½β·(x + score)
+        """
+        schedule = BetaSchedule()
+        mu = torch.randn(1, 3, 2)
+        sigma = torch.ones(1, 3, 2) * 0.5
+        weight = torch.ones(1, 3)
+        gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
+
+        t_val = 0.5
+        x = torch.randn(20, 1, 2)
+        v = gmm.velocity(x, t=t_val)
+
+        t_tensor = torch.full((20, 1), t_val)
+        half_beta = (0.5 * schedule.beta(t_tensor)).unsqueeze(-1)  # [20, 1, 1]
+        score = gmm.score(x, t=t_val)
+        v_expected = -half_beta * (x + score)
 
         torch.testing.assert_close(v, v_expected, atol=1e-5, rtol=1e-4)
 

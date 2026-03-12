@@ -214,8 +214,9 @@ The marginal velocity field (what we actually regress) is obtained by averaging 
 the data distribution and the noise:
 
 ```
-v_t(x) = E[ u_t(x_t | x_0) | x_t = x ]
-       = E[ ε − x_0 | x_t = x ]
+v_t(x) = E_{x0,ε}[ u_t(x_t | x_0) | x_t = x ]
+       = E_{x0,ε}[ u_t(x_t | x_0) | α_t x_0 + σ_t ε = x ]
+       = E_{x0,ε}[ ε − x_0 | α_t x_0 + σ_t ε = x ]
 ```
 
 The flow matching training objective is:
@@ -814,6 +815,228 @@ from .ode import ode_sample  # or add to diffusion.py
 | **torchGMM: score** | Exact | Exact (same autograd) |
 | **torchGMM: velocity** | Via PF-ODE conversion | Native (§5.7 formula) |
 | **torchGMM: generation** | `reverse_diffusion` (SDE) | `ode_sample` (ODE) |
+
+---
+
+## 8. Euler-Maruyama Integration in `sampling.py`
+
+`forward_sampling` and `reverse_sampling` share one Euler-Maruyama core:
+
+```
+x_{t+dt} = x_t + drift(x_t, t) dt + diffusion(t) √|dt| ε,    ε ~ N(0, I)
+```
+
+When `diffusion=None` the noise term is omitted (pure ODE).  `dt = t_{i+1} − t_i` is
+negative for reverse trajectories, so the sign is absorbed automatically.
+
+Below are the exact `drift` and `diffusion` callables for every supported mode.
+
+---
+
+### 8.1 Forward SDE — VP-SDE (BetaSchedule)
+
+The VP-SDE forward process that converts data to noise:
+
+```
+dX = f(X, t) dt + g(t) dW
+
+    f(x, t) = −½ β(t) x
+    g(t)    = √β(t)
+```
+
+Euler-Maruyama step (t increases 0 → 1):
+
+```
+x_{t+dt} = x_t  −  ½ β(t) x_t dt  +  √β(t) √dt ε
+```
+
+Callable construction:
+
+```python
+drift     = lambda x_, t_: schedule.forward_drift(x_, t_)   # = -½β(t) x
+diffusion = lambda t_: schedule.diffusion_coeff(t_)          # = √β(t)
+trajectory = forward_sampling(drift, diffusion, x0, t)
+```
+
+---
+
+### 8.2 Forward ODE — Probability Flow (any schedule)
+
+The probability flow ODE that transports the marginal deterministically:
+
+```
+dx/dt = v_t(x)
+
+    v_t(x) = (α̇_t / α_t) x  +  (σ̇_t − α̇_t σ_t / α_t) σ_t · s_t(x)
+```
+
+For the **VP-SDE** schedule this simplifies (using α̇_t/α_t = −½β, α²+σ²=1) to:
+
+```
+v_t(x) = −½ β(t) x  −  ½ β(t) s_t(x)
+```
+
+For the **flow matching** schedule (α_t = 1−t, σ_t = t, α̇_t = −1, σ̇_t = 1):
+
+```
+v_t(x) = −x/(1−t)  −  t/(1−t) · s_t(x)
+        = −(x + t · s_t(x)) / (1−t)
+```
+
+Euler-Maruyama step (t increases 0 → 1, diffusion=None):
+
+```
+x_{t+dt} = x_t  +  v_t(x_t) dt
+```
+
+Callable construction:
+
+```python
+drift     = gmm.velocity   # computes v_t(x) exactly for any schedule
+diffusion = None           # ODE — no noise
+trajectory = forward_sampling(drift, diffusion, x_init, t)
+```
+
+---
+
+### 8.3 Reverse ODE — Probability Flow (any schedule)
+
+Integrating the same ODE backwards (t decreases 1 → 0) recovers the data distribution.
+The velocity field is time-symmetric (v_t is the same function; only dt is negative):
+
+```
+dx = v_t(x) dt,    dt < 0   (t decreasing)
+```
+
+**BetaSchedule**  The probability flow ODE at reverse time:
+
+```
+dx = [−½ β(t) x  −  ½ β(t) s_t(x)] dt
+```
+
+**FlowMatchingSchedule**  Reverse probability flow ODE:
+
+```
+dx = [−(x + t · s_t(x)) / (1−t)] dt
+```
+
+Callable construction (same for both schedules):
+
+```python
+drift     = gmm.velocity   # gmm carries its schedule internally
+diffusion = None
+trajectory = reverse_sampling(drift, diffusion, x_noise, t)
+```
+
+---
+
+### 8.4 Reverse SDE — Anderson Reverse SDE (BetaSchedule)
+
+Anderson's (1982) time-reversal of the VP-SDE forward process:
+
+```
+dX = [f(X,t) − g(t)² s_t(X)] dt + g(t) dW̃
+
+    f(x, t) = −½ β(t) x
+    g(t)    = √β(t)
+```
+
+Expanding:
+
+```
+dX = [−½ β(t) X  −  β(t) s_t(X)] dt  +  √β(t) dW̃
+```
+
+Euler-Maruyama step (t decreases 1 → 0, dt < 0):
+
+```
+x_{t+dt} = x_t  +  [−½ β(t) x_t  −  β(t) s_t(x_t)] dt  +  √β(t) √|dt| ε
+```
+
+Note the **full** g² coefficient on the score (twice the probability flow ODE).
+
+Callable construction:
+
+```python
+def drift(x_, t_):
+    f = schedule.forward_drift(x_, t_)        # -½ β(t) x
+    g = schedule.diffusion_coeff(t_)           # √β(t)
+    return f - g**2 * gmm.score(x_, t_)
+
+diffusion = schedule.diffusion_coeff           # √β(t)
+trajectory = reverse_sampling(drift, diffusion, x_noise, t)
+```
+
+---
+
+### 8.5 Reverse SDE — Stochastic Flow Matching (any schedule)
+
+The deterministic flow matching ODE can be augmented with an arbitrary diffusion term
+γ(t) while preserving marginals (Albergo & Vanden-Eijnden, 2023).  The reverse SDE is:
+
+```
+dX = [v_t(X)  −  ½ γ(t)² s_t(X)] dt  +  γ(t) dW̃
+```
+
+γ(t) = 0 recovers the deterministic ODE.  Any γ(t) ≥ 0 preserves p_t(x) along the
+trajectory.
+
+Euler-Maruyama step (t decreases, dt < 0):
+
+```
+x_{t+dt} = x_t  +  [v_t(x_t)  −  ½ γ(t)² s_t(x_t)] dt  +  γ(t) √|dt| ε
+```
+
+**Common choices of γ(t):**
+
+| Name | γ(t) | Notes |
+|------|-------|-------|
+| Deterministic ODE | 0 | No noise; exact probability flow |
+| Schedule-matched | `schedule.diffusion_coeff(t)` | Matches VP-SDE noise level at each t |
+| Constant gamma | `γ` (constant) | Simple; γ = 0.5 is a practical default |
+
+Callable construction (constant γ):
+
+```python
+gamma = 0.5
+
+def drift(x_, t_):
+    return gmm.velocity(x_, t_) - 0.5 * gamma**2 * gmm.score(x_, t_)
+
+diffusion = lambda t_: torch.tensor(gamma)
+trajectory = reverse_sampling(drift, diffusion, x_noise, t)
+```
+
+---
+
+### 8.6 Initialisation at t_start
+
+Both reverse modes require samples from p_{t_start} as initial condition.
+
+**BetaSchedule** — starts at t_start = 1.0:
+`α_1 = exp(−½ ∫₀¹ β(s) ds) ≈ 0.0067`, so `p_1 ≈ N(0, I)`.
+Use `x = torch.randn(n, B, D)` as the initial condition.
+
+**FlowMatchingSchedule** — starts at t_start = 1 − ε (avoids 1/(1−t) singularity):
+`α_{1−ε} = ε`, so `p_{1−ε} ≈ N(0, (1−ε)² I) ≈ N(0, I)`.
+Use `x = torch.randn(n, B, D)` — valid approximation for ε ≤ 0.01.
+
+For forward ODE tests (checking marginals along a known trajectory), the exact initial
+condition is `x = gmm.sample(shape=n, t=t_start)` which draws from `p_{t_start}` exactly.
+
+---
+
+### 8.7 Summary of Drift and Diffusion Callables
+
+| Test | Direction | drift(x, t) | diffusion(t) |
+|------|-----------|-------------|--------------|
+| VP-SDE forward | 0 → 1 | `−½β x` | `√β` |
+| Forward probability flow ODE | 0 → 1 | `v_t(x)` | `None` |
+| Reverse probability flow ODE | 1 → 0 | `v_t(x)` | `None` |
+| Anderson reverse SDE | 1 → 0 | `−½β x − β s_t` | `√β` |
+| Stochastic flow matching SDE | 1 → 0 | `v_t(x) − ½γ² s_t` | `γ` |
+
+All five cases feed into the same `_euler_maruyama` loop in `sampling.py`.
 
 ---
 

@@ -1,5 +1,5 @@
 import torch
-from torchGMM.diffusion import forward_sampling, reverse_sampling
+from torchGMM.sampling import forward_sampling, reverse_sampling
 from torchGMM.gmm import TimeDependentGMM
 from torchGMM.schedule import BetaSchedule
 import matplotlib.pyplot as plt

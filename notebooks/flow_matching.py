@@ -14,7 +14,7 @@ import numpy as np
 from _utils import plt_show
 
 from torchGMM import TimeDependentGMM, FlowMatchingSchedule, BetaSchedule
-from torchGMM.diffusion import reverse_sampling
+from torchGMM.sampling import reverse_sampling
 
 torch.manual_seed(42)
 

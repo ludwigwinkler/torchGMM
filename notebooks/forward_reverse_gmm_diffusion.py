@@ -1,6 +1,6 @@
 import torch, einops
 from torchGMM import TimeDependentGMM, Conditional
-from torchGMM.diffusion import forward_sampling, reverse_sampling
+from torchGMM.sampling import forward_sampling, reverse_sampling
 from torchGMM.schedule import FlowMatchingSchedule, BetaSchedule
 from torch.distributions import MultivariateNormal
 import matplotlib.pyplot as plt
