@@ -1,8 +1,10 @@
-import torch
-import einops
 import numbers
-from torch.distributions import MultivariateNormal, Normal, MixtureSameFamily, Categorical
-from torchGMM.schedule import BetaSchedule
+
+import einops
+import torch
+from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal, Normal
+
+from torchGMM.schedule import BetaSchedule, FlowMatchingSchedule, Schedule
 
 """
 TimeDependentGMM: GMM with params [*B, K, D]. Two shapes only:
@@ -14,7 +16,11 @@ TimeDependentGMM: GMM with params [*B, K, D]. Two shapes only:
 
 class TimeDependentGMM(torch.nn.Module):
     def __init__(
-        self, mu: torch.Tensor, sigma: torch.Tensor = None, weight: torch.Tensor = None, schedule: BetaSchedule = None
+        self,
+        mu: torch.Tensor,
+        sigma: torch.Tensor | None = None,
+        weight: torch.Tensor | None = None,
+        schedule: Schedule | None = None,
     ):
         super().__init__()
         """
@@ -22,15 +28,15 @@ class TimeDependentGMM(torch.nn.Module):
             mu: [..., k, d] - means for batched GMMs, each with k components and d dimensions
             sigma: [..., k, d] - standard deviations for batched GMMs, each with k components and d dimensions
             weight: [..., k] - mixture weights for batched GMMs, each with k components
-            schedule: Optional BetaSchedule. If not provided, defaults to BetaSchedule(beta_min=0.1, beta_max=20.0).
+            schedule: Optional Schedule. If not provided, defaults to BetaSchedule(beta_min=0.1, beta_max=20.0).
         """
         assert (mu is not None and sigma is not None and weight is not None) or (
             mu is not None
         ), "Mu, sigma, and weight must be provided or just mu"
-        mu = torch.tensor(mu)
+        mu = torch.as_tensor(mu)
         assert mu.dim() >= 2, f"mu must be at least 2D [*, k, d], got {mu.shape}"
-        sigma = torch.zeros_like(mu) + 1e-10 if sigma is None else torch.tensor(sigma)
-        weight = mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.tensor(weight)
+        sigma = torch.zeros_like(mu) + 1e-10 if sigma is None else torch.as_tensor(sigma)
+        weight = mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.as_tensor(weight)
 
         assert (
             mu.shape[:-1] == sigma.shape[:-1] == weight.shape
@@ -69,7 +75,7 @@ class TimeDependentGMM(torch.nn.Module):
         self.batch_shape = self.batch_shape
         self.event_shape = (self.dim,)  # [Dim]
 
-        self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if not schedule else schedule
+        self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if schedule is None else schedule
 
     def _expand_t(self, t: numbers.Number | torch.Tensor | None, sample_shape: tuple) -> torch.Tensor:
         """Return t with shape [*sample_shape, *batch_shape]. Accept t scalar, [*B], or [*N,*B]."""
@@ -240,7 +246,34 @@ class TimeDependentGMM(torch.nn.Module):
         score = torch.autograd.grad(self._gmm_t(t_exp).log_prob(x_grad).sum(), x_grad, create_graph=False)[0].detach()
         return score
 
-    def sample(self, shape: tuple | int | None = None, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def velocity(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+        """velocity(x, t) -> [*N, *B, D]. Marginal velocity field.
+
+        Derived from v_t(x) = (dα/dt) E[x_0|x_t=x] + (dσ/dt) E[ε|x_t=x]
+        using Tweedie: E[x_0|x_t] = (x + σ² score) / α, E[ε|x_t] = -σ score.
+        """
+        assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
+        assert (
+            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
+        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        sample_shape = x.shape[: -(self.batch_ndim + 1)]
+        t_exp = self._expand_t(t, sample_shape)  # [*N, *B]
+        assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
+
+        alpha_t = self.schedule.get_alpha_t(t_exp)  # [*N, *B]
+        sigma_t = self.schedule.get_sigma_t(t_exp)  # [*N, *B]
+        dalpha_dt = self.schedule.get_dalpha_dt(t_exp)  # [*N, *B]
+        dsigma_dt = self.schedule.get_dsigma_dt(t_exp)  # [*N, *B]
+
+        score = self.score(x, t)  # [*N, *B, D]
+
+        # v = (dα/dt / α) x + (dα/dt σ/α - dσ/dt) σ score
+        coeff_x = (dalpha_dt / alpha_t).unsqueeze(-1)  # [*N, *B, 1]
+        coeff_score = ((dalpha_dt * sigma_t / alpha_t - dsigma_dt) * sigma_t).unsqueeze(-1)  # [*N, *B, 1]
+
+        return coeff_x * x + coeff_score * score
+
+    def sample(self, shape: tuple | int | None = None, t: float | torch.Tensor | None = None) -> torch.Tensor:
         """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: scalar or shape [*N,*B] in [0, 1]."""
         if shape is None:
             sample_shape = ()
@@ -262,7 +295,6 @@ class TimeDependentGMM(torch.nn.Module):
 
 
 from torchGMM.conditional import Conditional
-
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
