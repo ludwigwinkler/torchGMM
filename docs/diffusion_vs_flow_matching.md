@@ -81,7 +81,8 @@ $$
 v_t(x) 
 &= \frac{\dot{\alpha}_t}{\alpha_t}\, x + \left(\frac{\dot{\alpha}_t \sigma_t^2}{\alpha_t} - \dot{\sigma}_t \sigma_t \right) s_t(x) \\
 &= \frac{-x}{1-t} + \left(\frac{-t^2}{1-t} - t\right) s_t(x)\\
-&= \frac{-x}{1-t} + \left(\frac{-t^2}{1-t} - t\frac{1-t}{1-t}\right) s_t(x)
+&= \frac{-x}{1-t} + \left(\frac{-t^2}{1-t} - t\frac{1-t}{1-t}\right) s_t(x) \\
+&= \frac{-x}{1-t} + \left(\frac{-t^2 - t+t^2}{1-t}\right) s_t(x)
 \end{align*}
 $$
 
