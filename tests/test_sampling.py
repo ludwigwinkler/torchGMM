@@ -1,3 +1,4 @@
+from sympy.utilities.lambdify import implemented_function
 import sys
 
 import pytest
@@ -48,12 +49,12 @@ def _histogram_setup():
 
 class TestForwardSampling:
 
+    t_eps = 0.01
+
     @pytest.mark.parametrize(
         "schedule_cls, t_start, t_end",
         [
-            # BetaSchedule: t=0 has sigma_t=0, making get_dsigma_dt (∝ 1/sigma_t) singular
             (BetaSchedule, 0.01, 0.99),
-            # FlowMatchingSchedule: singularity at t=1; t<0.1 gives marginal std < bin width
             (FlowMatchingSchedule, 0.01, 0.99),
         ],
     )
@@ -90,6 +91,58 @@ class TestForwardSampling:
             assert (hist - target).abs().max() < 0.05, (
                 f"{schedule_cls.__name__} forward ODE @ t={t_:.3f}: " f"max deviation {(hist - target).abs().max():.3f}"
             )
+
+    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, FlowMatchingSchedule])
+    @pytest.mark.parametrize("gamma", [0.1, 0.5, 1.0, 1.5], ids=lambda x: f"gamma={x}")
+    def test_forward_sde_marginals(self, schedule_cls, gamma):
+        """Forward SDE marginals match analytical GMM marginals at every 5 steps."""
+        mu = torch.tensor([[-2.0, 0.0, 2.0], [-1.5, 0.5, 2.5]]).reshape(2, 3, 1)
+        sigma = torch.tensor([[0.3, 0.3, 0.2], [0.2, 0.4, 0.3]]).reshape(2, 3, 1)
+        weight = torch.tensor([[0.33, 0.5, 0.17], [0.25, 0.5, 0.25]]).reshape(2, 3)
+        schedule = schedule_cls()
+        gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        n_samples, n_steps = 50_000, 100
+        t = torch.linspace(self.t_eps, 1 - self.t_eps, n_steps)
+        x = gmm.sample(shape=n_samples, t=self.t_eps)  # [N, B=2, D=1]
+
+        if schedule_cls is BetaSchedule:
+
+            def drift_fn(x_, t_):
+                return schedule.forward_drift(x_, t_)
+
+            def diffusion_fn(t_):
+                return schedule.diffusion_coeff(t_)
+
+        elif schedule_cls is FlowMatchingSchedule:
+
+            def drift_fn(x_, t_):
+                return gmm.velocity(x_, t_) + 0.5 * gamma**2 * gmm.score(x_, t_)
+
+            def diffusion_fn(t_):
+                return gamma
+
+        trajectory = forward_sampling(drift_fn, diffusion_fn, x, t)  # [T, N, B=2, D=1]
+
+        assert trajectory.shape == (len(t), n_samples, 2, 1)
+        assert torch.allclose(trajectory[0], x, atol=1e-5)
+
+        x_grid = torch.linspace(-5, 5, 51).reshape(-1, 1, 1).repeat(1, 2, 1)
+        dx = x_grid[1, 0, 0] - x_grid[0, 0, 0]
+        x_flat = x_grid[:, 0, 0].squeeze()
+        bin_edges = torch.cat([(x_flat[0] - dx / 2).unsqueeze(0), x_flat + dx / 2])
+
+        for t_idx in range(t.numel())[::5]:
+            t_ = t[t_idx]
+            target_dist = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)  # [51, 2]
+            for dim in range(gmm.dim):
+                trajectory_dim = trajectory[t_idx, :, dim, 0].unsqueeze(-2)
+                hist, _ = torch.histogram(trajectory_dim, bins=bin_edges, density=True)
+                assert target_dist.shape[:1] == hist.shape
+                assert (hist - target_dist[:, dim]).abs().max() < 0.05, (
+                    f"{schedule_cls.__name__} forward SDE gamma={gamma} @ t={t_:.3f} dim={dim}: "
+                    f"max deviation {(hist - target_dist[:, dim]).abs().max():.3f}"
+                )
 
 
 class TestReverseSampling:

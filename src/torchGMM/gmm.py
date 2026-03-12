@@ -273,7 +273,7 @@ class TimeDependentGMM(torch.nn.Module):
 
         return coeff_x * x + coeff_score * score
 
-    def sample(self, shape: tuple | int | None = None, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def sample(self, shape: tuple | int | None = None, t: float | torch.Tensor | None = None) -> torch.Tensor:
         """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: scalar or shape [*N,*B] in [0, 1]."""
         if shape is None:
             sample_shape = ()
