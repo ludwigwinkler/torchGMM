@@ -103,13 +103,6 @@ class BetaSchedule(Schedule):
         """g(t) = √β(t)"""
         return torch.sqrt(self.beta(t))
 
-    def get_t_from_lambda(self, lambda_t: torch.Tensor) -> torch.Tensor:
-        """Used by DPMsolver. The formula comes from Section D.4 of the DPMsolver paper."""
-        log_exp = 2 * torch.log(1 + torch.exp(-2 * lambda_t))
-        sqrt_denom = torch.sqrt(self.beta_min**2 + (self.beta_max - self.beta_min) * log_exp)
-        t_lambda = log_exp / (sqrt_denom + self.beta_min)
-        return t_lambda
-
 
 class FlowMatchingSchedule(Schedule):
     """Linear interpolation (conditional OT) schedule: α_t = 1 − t, σ_t = t.

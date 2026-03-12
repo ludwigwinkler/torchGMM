@@ -320,6 +320,6 @@ class TestDeviceHandling:
             g = schedule.diffusion_coeff(t_)
             return f - g**2 * gmm.score(x_, t_)
 
-        trajectory = reverse_sampling(drift, schedule.safsa, x, t)
+        trajectory = reverse_sampling(drift, schedule.diffusion_coeff, x, t)
         assert trajectory.device == x.device
         assert trajectory.shape == (len(t), 100, 1, 1)
