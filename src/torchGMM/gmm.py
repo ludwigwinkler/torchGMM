@@ -4,7 +4,7 @@ import einops
 import torch
 from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal, Normal
 
-from torchGMM.schedule import BetaSchedule, FlowMatchingSchedule, Schedule
+from torchGMM.schedule import BetaSchedule, LinearSchedule, Schedule
 
 """
 TimeDependentGMM: GMM with params [*B, K, D]. Two shapes only:

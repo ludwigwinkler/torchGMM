@@ -104,7 +104,7 @@ class BetaSchedule(Schedule):
         return torch.sqrt(self.beta(t))
 
 
-class FlowMatchingSchedule(Schedule):
+class LinearSchedule(Schedule):
     """Linear interpolation (conditional OT) schedule: α_t = 1 − t, σ_t = t.
 
     This is the schedule used by flow matching / rectified flow. The interpolation

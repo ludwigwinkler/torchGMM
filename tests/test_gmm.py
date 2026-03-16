@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from torchGMM.gmm import Conditional, TimeDependentGMM
-from torchGMM.schedule import BetaSchedule, FlowMatchingSchedule
+from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 
 def get_local_device():
@@ -485,10 +485,10 @@ class TestVelocity:
         v = gmm.velocity(x, t=t)
         assert v.shape == expected_shape, f"Expected {expected_shape}, got {v.shape}"
 
-    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, FlowMatchingSchedule])
+    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule])
     def test_score_velocity_consistency(self, schedule_cls):
         """Verify v = (dα/dt / α) x + (dα/dt σ/α - dσ/dt) σ score for both schedules — the Tweedie velocity formula."""
-        schedule = schedule_cls() if schedule_cls == FlowMatchingSchedule else schedule_cls(beta_min=0.1, beta_max=20.0)
+        schedule = schedule_cls() if schedule_cls == LinearSchedule else schedule_cls(beta_min=0.1, beta_max=20.0)
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
         weight = torch.ones(1, 3)
@@ -520,7 +520,7 @@ class TestVelocity:
           coeff_score = (dα/dt·σ/α - dσ/dt)·σ = (-t/(1-t) - 1)·t = -t/(1-t)
           v = -x/(1-t) - t·score/(1-t) = -(x + t·score)/(1-t)
         """
-        schedule = FlowMatchingSchedule()
+        schedule = LinearSchedule()
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
         weight = torch.ones(1, 3)

@@ -1,7 +1,7 @@
 import torch, einops
 from torchGMM import TimeDependentGMM, Conditional
 from torchGMM.sampling import forward_sampling, reverse_sampling
-from torchGMM.schedule import FlowMatchingSchedule, BetaSchedule
+from torchGMM.schedule import LinearSchedule, BetaSchedule
 from torch.distributions import MultivariateNormal
 import matplotlib.pyplot as plt
 
@@ -26,7 +26,7 @@ mu = torch.tensor([-2, 0, 2]).reshape(1, 3, 1)
 sigma = torch.tensor([0.3, 0.1, 0.2]).reshape(1, 3, 1)
 weight = torch.tensor([0.33, 0.5, 0.1]).reshape(1, 3)
 
-schedule = FlowMatchingSchedule()
+schedule = LinearSchedule()
 gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 x_grid_b = torch.linspace(-5, 5, 100).reshape(-1, 1, 1)  # [N, B=1, D=1]
 plt.plot(x_grid_b.squeeze(), gmm.log_prob(x_grid_b, t=0.0).exp().squeeze())
@@ -75,7 +75,7 @@ plt_show()
 
 # %%[markdown]
 # # Reverse Flow Matching
-schedule = FlowMatchingSchedule()
+schedule = LinearSchedule()
 gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 x = torch.randn(10_000, 1, 1)  # [N, B=1, D=1]
@@ -99,7 +99,7 @@ plt_show()
 
 # %%[markdown]
 # # Reverse Flow Matching with SDE sampling
-schedule = FlowMatchingSchedule()
+schedule = LinearSchedule()
 gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 x = torch.randn(10_000, 1, 1)  # [N, B=1, D=1]
@@ -249,8 +249,8 @@ def _rev_traj(mode, sched, gmm_, gam, eps_, ns, nsteps):
 
 
 _cases = [
-    ("Flow Matching — ODE", FlowMatchingSchedule, "ODE"),
-    ("Flow Matching — SDE", FlowMatchingSchedule, "SDE"),
+    ("Flow Matching — ODE", LinearSchedule, "ODE"),
+    ("Flow Matching — SDE", LinearSchedule, "SDE"),
     ("Beta Schedule — ODE", BetaSchedule, "ODE"),
     ("Beta Schedule — SDE", BetaSchedule, "SDE"),
 ]

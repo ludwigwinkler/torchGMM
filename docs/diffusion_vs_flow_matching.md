@@ -132,4 +132,4 @@ $$x_{t+dt} = x_t + \mathrm{drift}(x_t, t)\cdot dt + \mathrm{diffusion}(t)\cdot\s
 
 $$\text{BetaSchedule:} \qquad x_{\text{start}} \sim \mathcal{N}(0, I) \quad \text{at } t_{\text{start}} = 1$$
 
-$$\text{FlowMatchingSchedule:} \qquad x_{\text{start}} \sim \mathcal{N}(0, I) \quad \text{at } t_{\text{start}} = 1 - \varepsilon \quad \text{(avoids } 1/(1-t) \text{ singularity)}$$
+$$\text{LinearSchedule:} \qquad x_{\text{start}} \sim \mathcal{N}(0, I) \quad \text{at } t_{\text{start}} = 1 - \varepsilon \quad \text{(avoids } 1/(1-t) \text{ singularity)}$$

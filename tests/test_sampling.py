@@ -7,7 +7,7 @@ import torch
 torch.set_printoptions(sci_mode=False)
 from torchGMM.sampling import forward_sampling, reverse_sampling
 from torchGMM.gmm import TimeDependentGMM
-from torchGMM.schedule import BetaSchedule, FlowMatchingSchedule
+from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 
 def get_local_device():
@@ -55,7 +55,7 @@ class TestForwardSampling:
         "schedule_cls, t_start, t_end",
         [
             (BetaSchedule, 0.01, 0.99),
-            (FlowMatchingSchedule, 0.01, 0.99),
+            (LinearSchedule, 0.01, 0.99),
         ],
     )
     def test_forward_ode_marginals(self, schedule_cls, t_start, t_end):
@@ -92,7 +92,7 @@ class TestForwardSampling:
                 f"{schedule_cls.__name__} forward ODE @ t={t_:.3f}: " f"max deviation {(hist - target).abs().max():.3f}"
             )
 
-    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, FlowMatchingSchedule])
+    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule])
     @pytest.mark.parametrize("gamma", [0.1, 0.5, 1.0, 1.5], ids=lambda x: f"gamma={x}")
     def test_forward_sde_marginals(self, schedule_cls, gamma):
         """Forward SDE marginals match analytical GMM marginals at every 5 steps."""
@@ -114,7 +114,7 @@ class TestForwardSampling:
             def diffusion_fn(t_):
                 return schedule.diffusion_coeff(t_)
 
-        elif schedule_cls is FlowMatchingSchedule:
+        elif schedule_cls is LinearSchedule:
 
             def drift_fn(x_, t_):
                 return gmm.velocity(x_, t_) + 0.5 * gamma**2 * gmm.score(x_, t_)
@@ -162,7 +162,7 @@ class TestReverseSampling:
 
     @pytest.mark.parametrize(
         "schedule_cls",
-        [BetaSchedule, FlowMatchingSchedule],
+        [BetaSchedule, LinearSchedule],
     )
     def test_reverse_ode_marginals(self, schedule_cls):
         """Probability flow ODE: dx = v(x,t) dt. Histogram matches analytical GMM marginal every 5 steps."""
@@ -183,7 +183,7 @@ class TestReverseSampling:
                 g = schedule.diffusion_coeff(t_)
                 return f - 1 / 2 * g**2 * gmm.score(x_, t_)
 
-        elif schedule_cls is FlowMatchingSchedule:
+        elif schedule_cls is LinearSchedule:
             # Flow matching ODE: dx = v(x,t) dt. Histograms match analytical marginals every 5 steps.
             drift_fn = gmm.velocity
 
@@ -206,7 +206,7 @@ class TestReverseSampling:
                 f"{schedule_cls.__name__} ODE @ t={t_:.3f}: max deviation {(hist - target).abs().max():.3f}"
             )
 
-    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, FlowMatchingSchedule])
+    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule])
     @pytest.mark.parametrize("gamma", [0.1, 0.5, 1.0, 1.5], ids=lambda x: f"gamma={x}")
     def test_reverse_sde_marginals(self, schedule_cls, gamma):
         """BetaSchedule Anderson reverse SDE: dx = [f − g² score] dt + g dW. Histograms match analytical marginals every 5 steps."""
@@ -229,7 +229,7 @@ class TestReverseSampling:
             def diffusion_fn(t_):
                 return gamma * schedule.diffusion_coeff(t_)
 
-        elif schedule_cls is FlowMatchingSchedule:
+        elif schedule_cls is LinearSchedule:
 
             def drift_fn(x_, t_):
                 return gmm.velocity(x_, t_) - 1 / 2 * gamma**2 * gmm.score(x_, t_)

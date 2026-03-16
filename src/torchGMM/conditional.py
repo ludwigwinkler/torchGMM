@@ -1,7 +1,7 @@
 import torch
 
 from torchGMM.gmm import TimeDependentGMM
-from torchGMM.schedule import BetaSchedule, FlowMatchingSchedule, Schedule
+from torchGMM.schedule import BetaSchedule, LinearSchedule, Schedule
 
 
 class Conditional(TimeDependentGMM):
