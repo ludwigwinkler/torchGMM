@@ -19,6 +19,7 @@ pytest                                                           # All tests (pa
 pytest tests/test_gmm.py                                        # Single file
 pytest tests/test_gmm.py::TestShapes::test_gmm_initialization   # Single test
 pytest -m "not slow"                                            # Exclude slow tests
+pytest -n 8                                                      # Run all tests with 8 xdist workers
 ```
 
 **Lint and format:**
@@ -31,8 +32,10 @@ black src tests && isort src tests && flake8 src tests
 **Public API** (`src/torchGMM/__init__.py`):
 - `TimeDependentGMM` — batched GMM with diffusion schedule; core class
 - `Conditional` — wraps a single point x0 as a single-component GMM
-- `BetaSchedule` — linear β(t) schedule for VP-SDE
-- `forward_diffusion`, `reverse_diffusion`, `reverse_step` — SDE simulation
+- `Schedule` — base class for interpolation schedules
+- `BetaSchedule` — VP-SDE schedule with linear β(t); satisfies α_t² + σ_t² = 1
+- `LinearSchedule` — flow matching / rectified flow schedule; α_t = 1−t, σ_t = t
+- `forward_sampling`, `reverse_sampling` — Euler-Maruyama SDE/ODE simulation
 
 **Key abstractions:**
 
@@ -40,9 +43,9 @@ black src tests && isort src tests && flake8 src tests
 - Scalars like `log_prob` / `energy`: `[*N, *B]`
 - Vectors like `score` / `sample`: `[*N, *B, D]`
 
-`BetaSchedule` computes α_t and σ_t for the VP-SDE marginal: `p(x_t | x_0) = N(α_t · x_0, σ_t² I)`.
+`Schedule` base class provides `get_alpha_t`, `get_sigma_t`, `forward_drift`, and `diffusion_coeff`. `BetaSchedule` and `LinearSchedule` are concrete implementations.
 
-`diffusion.py` implements Euler-Maruyama for forward and reverse SDEs. `reverse_diffusion` takes a `score_fn: callable` and runs the reverse SDE trajectory.
+`sampling.py` implements Euler-Maruyama for forward and reverse SDEs. Both `forward_sampling` and `reverse_sampling` take `drift: callable`, `diffusion: callable | None`, initial state `x`, and a time grid `t`. The caller constructs drift/diffusion callables from the schedule and GMM score before calling.
 
 ## Conventions
 

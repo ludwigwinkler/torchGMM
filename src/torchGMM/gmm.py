@@ -35,14 +35,18 @@ class TimeDependentGMM(torch.nn.Module):
         ), "Mu, sigma, and weight must be provided or just mu"
         mu = torch.as_tensor(mu)
         assert mu.dim() >= 2, f"mu must be at least 2D [*, k, d], got {mu.shape}"
-        sigma = torch.zeros_like(mu) + 1e-10 if sigma is None else torch.as_tensor(sigma)
-        weight = mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.as_tensor(weight)
+        sigma = (
+            torch.zeros_like(mu) + 1e-10 if sigma is None else torch.as_tensor(sigma)
+        )  # no sigma → near-zero (point mass)
+        weight = (
+            mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.as_tensor(weight)
+        )  # no weight → single uniform component
 
         assert (
             mu.shape[:-1] == sigma.shape[:-1] == weight.shape
         ), f"mu/sigma/weight leading shapes must match: mu {mu.shape}, sigma {sigma.shape}, weight {weight.shape}"
 
-        # If mu is [K, D], treat it as a single-batch GMM and expand to [1, K, D]
+        # mu is [K, D]: no explicit batch dim provided → wrap into a single-element batch [1, K, D]
         if mu.dim() == 2:
             mu = mu.unsqueeze(0)
             sigma = sigma.unsqueeze(0)
@@ -64,6 +68,7 @@ class TimeDependentGMM(torch.nn.Module):
         self.register_buffer("sigma", sigma)
         self.register_buffer("weight", weight)
 
+        # Convenience attributes for batch shape and dimensions
         self.batch_shape = mu.shape[:-2]  # [...BS, K, D]
         self.batch_ndim = len(self.batch_shape)  # #batch_dims
         self.num_components = mu.shape[-2]
@@ -80,22 +85,27 @@ class TimeDependentGMM(torch.nn.Module):
     def _expand_t(self, t: numbers.Number | torch.Tensor | None, sample_shape: tuple) -> torch.Tensor:
         """Return t with shape [*sample_shape, *batch_shape]. Accept t scalar, [*B], or [*N,*B]."""
         if t is None:
-            # None initializes to 0.0
+            # no t provided → assume clean data at t=0
             return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * 0.0
         elif not isinstance(t, torch.Tensor):
+            # Python scalar (int/float) → broadcast to full [*sample_shape, *batch_shape]
             t_value = float(t)
             self._validate_time_range(t_value)
             return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * t_value
         elif t.dim() == 0:
+            # 0-dim tensor (e.g. torch.tensor(0.5)) → same as scalar, broadcast to full shape
             t_value = t.item()
             self._validate_time_range(t_value)
             return torch.ones(*(sample_shape + self.batch_shape), device=t.device, dtype=t.dtype) * t_value
         elif t.shape == sample_shape + self.batch_shape:
+            # t already has the full [*sample_shape, *batch_shape] shape → use as-is
             self._validate_time_range(t)
             return t
         elif t.shape == self.batch_shape:
+            # t has only batch shape (one t per GMM in the batch) → expand over sample dims
             self._validate_time_range(t)
             if len(sample_shape) == 0:
+                # no sample dims requested → batch shape is the full shape already
                 return t
             return t.expand(sample_shape + self.batch_shape)
         raise ValueError(
@@ -112,11 +122,13 @@ class TimeDependentGMM(torch.nn.Module):
     @staticmethod
     def _validate_time_range(t: numbers.Number | torch.Tensor) -> None:
         if isinstance(t, torch.Tensor):
+            # tensor path: check element-wise so the full batch is validated at once
             if not torch.all(torch.isfinite(t)):
                 raise ValueError("t must be finite")
             if not torch.all((t >= 0) & (t <= 1)):
                 raise ValueError("t must be within [0, 1]")
         else:
+            # scalar path: plain Python comparison suffices
             if not (0 <= t <= 1):
                 raise ValueError("t must be within [0, 1]")
 
@@ -276,10 +288,13 @@ class TimeDependentGMM(torch.nn.Module):
     def sample(self, shape: tuple | int | None = None, t: float | torch.Tensor | None = None) -> torch.Tensor:
         """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: scalar or shape [*N,*B] in [0, 1]."""
         if shape is None:
+            # no shape → one sample per GMM in the batch, output is [*batch_shape, D]
             sample_shape = ()
         elif isinstance(shape, int):
+            # single int N → N i.i.d. samples per batch element, output is [N, *batch_shape, D]
             sample_shape = (shape,)
         elif isinstance(shape, tuple):
+            # full shape tuple → must end with batch_shape; leading dims become sample dims
             assert (
                 shape[-self.batch_ndim :] == self.batch_shape
             ), f"shape must end with batch_shape {self.batch_shape}, got {shape}"
@@ -294,28 +309,21 @@ class TimeDependentGMM(torch.nn.Module):
         return f"TimeDependentGMM(mu={self.mu.shape}, sigma={self.sigma.shape}, weight={self.weight.shape})"
 
 
-from torchGMM.conditional import Conditional
+class Conditional(TimeDependentGMM):
+    """Wraps a single point x0 as a single-component GMM (near-delta distribution).
 
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
+    Args:
+        x0: [*B, D] — one point per batch element
+        schedule: Optional Schedule. Defaults to BetaSchedule.
+    """
 
-    for _ in range(3):
-        num_components = 5
-        # Create batched GMM with batch_shape=(1,) (single GMM)
-        mu = torch.ones(1, num_components, 2).uniform_(-3, 3)  # [1, k=5, d=2]
-        sigma = torch.ones(1, num_components, 2).uniform_(0.5, 1.2)  # [1, k=5, d=2]
-        weight = torch.ones(1, num_components).uniform_(0.3, 1.0)  # [1, k=5]
-        gmm = TimeDependentGMM(mu, sigma, weight)
-        samples = gmm.sample(1_000_000)  # [n_samples=1_000_000, 1, d=2]
-        # Extract samples for plotting: [1_000_000, 2]
-        samples_plot = samples[0]  # [1_000_000, 2]
-        plt.hist2d(samples_plot[:, 0], samples_plot[:, 1], bins=100)
-        plt.grid()
-        plt.show()
+    def __init__(self, x0: torch.Tensor, schedule: Schedule | None = None):
+        x0 = torch.as_tensor(x0)
+        assert x0.dim() >= 1, "x0 must be at least 1D [*B, D]"
+        mu = x0.unsqueeze(-2)  # [*B, 1, D]
+        sigma = torch.ones_like(mu) * 1e-10  # near-zero for delta approximation
+        weight = x0.new_ones(*x0.shape[:-1], 1)  # [*B, 1]
+        super().__init__(mu, sigma, weight, schedule)
 
-    # from mcmc.metropolis_hasting_nd import batch_mh, batch_langevin
-
-    def sample_fn(x):
-        return gmm.energy(x), x
-
-    init_samples = torch.randn(500, 2)
+    def __repr__(self):
+        return f"Conditional(x0={self.mu.squeeze(-2).shape}, batch_shape={self.batch_shape}, schedule={type(self.schedule).__name__})"
