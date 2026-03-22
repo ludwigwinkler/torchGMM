@@ -3,7 +3,7 @@
 Analytical diffusion on Gaussian Mixture Models in PyTorch.
 
 <p align="center">
-  <img src="notebooks/diffusion.gif" alt="Forward and reverse diffusion on a 1-D GMM" width="800">
+  <img src="notebooks/forward_backward_diffusion.gif" alt="Forward and reverse diffusion on a 1-D GMM" width="800">
 </p>
 
 torchGMM provides **time-dependent GMMs** with closed-form log-probabilities, scores, and sampling under a forward SDE diffusion process — no neural network required. Because the GMM family is closed under Gaussian convolution, every quantity (density, score, energy) stays exact at every noise level $t \in [0, 1]$.
@@ -31,6 +31,16 @@ where $\alpha_t = \exp\!\bigl(-\tfrac{1}{2}\int_0^t \beta(s)\,ds\bigr)$ and $\si
 - **Conditional process** — collapse the mixture to a single Dirac at $x_0$ for conditional sampling / inference.
 - **Marginalisation & mode dropping** — extract 1-D marginals or remove components on the fly.
 - **Pure PyTorch** — differentiable end-to-end, GPU-friendly, no custom C++/CUDA.
+- **Steering** — compute exact importance weights and ESS for steering the reverse process towards a target distribution.
+
+## Steering
+
+torchGMM uses [FeynmanKac-Correctors](https://arxiv.org/pdf/2503.02819) to steer the reverse SDE towards an arbitrary target distribution $p(x) \propto q(x) \exp(\beta r(x))$, using the theory developed in the FKC paper.
+This allows you to sample from very particular regions of the sampling space with the correct importance weights.
+
+<p align="center">
+  <img src="notebooks/steered_diffusion.gif" alt="Forward and reverse diffusion on a 1-D GMM" width="800">
+</p>
 
 ## Installation
 

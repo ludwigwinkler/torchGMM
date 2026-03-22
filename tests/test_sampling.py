@@ -5,7 +5,7 @@ import pytest
 import torch
 
 torch.set_printoptions(sci_mode=False)
-from torchGMM.sampling import forward_sampling, reverse_sampling
+from torchGMM.sampling import forward_sampling, reverse_sampling, steered_reverse_sampling
 from torchGMM.gmm import TimeDependentGMM
 from torchGMM.schedule import BetaSchedule, LinearSchedule
 
@@ -102,7 +102,7 @@ class TestForwardSampling:
         schedule = schedule_cls()
         gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
-        n_samples, n_steps = 50_000, 100
+        n_samples, n_steps = 50_000, 200
         t = torch.linspace(self.t_eps, 1 - self.t_eps, n_steps)
         x = gmm.sample(shape=n_samples, t=self.t_eps)  # [N, B=2, D=1]
 
@@ -218,7 +218,7 @@ class TestReverseSampling:
 
         # BetaSchedule: no singularity at t=1. FlowMatching: 1/(1-t) singularity → start at 1-eps.
         x = torch.randn(50_000, 2, 1)
-        t = torch.linspace(1 - self.eps, self.eps, 100)
+        t = torch.linspace(1 - self.eps, self.eps, 200)
         if schedule_cls is BetaSchedule:
 
             def drift_fn(x_, t_):
@@ -324,6 +324,128 @@ class TestValidation:
         traj1 = forward_sampling(drift, diffusion, x, t)
         traj2 = forward_sampling(drift, diffusion, x, t)
         assert not torch.allclose(traj1[-1], traj2[-1])
+
+
+@pytest.mark.slow
+class TestSteeredSampling:
+    """SMC-steered reverse sampling via FKC weight update."""
+
+    EPS = 0.001
+    N_PARTICLES = 20_000
+    N_STEPS = 500
+
+    @pytest.fixture
+    def setup(self):
+        sched = BetaSchedule(beta_min=0.1, beta_max=20.0)
+        gmm = TimeDependentGMM(
+            mu=torch.tensor([[[-2.5], [2.5]]]),
+            sigma=torch.tensor([[[0.8], [0.8]]]),
+            weight=torch.tensor([[0.2, 0.8]]),
+        )
+        return gmm, sched
+
+    def _plot(self, xs_flat, p_data, p_rew, hist, x_final, reward_center, reward_sigma):
+        """Debug helper: plot unguided GMM, reward-tilted ground truth, and steered sample histogram."""
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(xs_flat, p_data, label="Unguided GMM", color="steelblue", linewidth=2)
+        ax.plot(xs_flat, p_rew, label="Reward-tilted (ground truth)", color="firebrick", linewidth=2)
+        ax.stairs(
+            hist,
+            torch.cat([xs_flat[:1] - (xs_flat[1] - xs_flat[0]) / 2, xs_flat + (xs_flat[1] - xs_flat[0]) / 2]),
+            label="Steered samples",
+            fill=True,
+            alpha=0.4,
+            color="seagreen",
+        )
+        ax.axvline(
+            reward_center, color="firebrick", linestyle="--", linewidth=1, label=f"Reward center={reward_center}"
+        )
+        ax.set_title(f"Steered sampling  |  reward_center={reward_center}  reward_sigma={reward_sigma}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("density")
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+
+    @pytest.mark.parametrize(
+        "reward_center,reward_sigma",
+        [(-2.0, 1.0), (-1.5, 1.0), (-1.5, 1.5), (-1.0, 1.0), (-1.0, 1.5)],
+        ids=lambda v: f"{v}",
+    )
+    def test_steered_sampling(self, setup, reward_center, reward_sigma):
+        gmm, sched = setup
+
+        def r(x):
+            return -0.5 * (x - reward_center) ** 2 / reward_sigma**2
+
+        def grad_r(x):
+            return -(x - reward_center) / reward_sigma**2
+
+        def guided_drift(x, t):
+            f = sched.forward_drift(x, t)
+            sigma = sched.diffusion_coeff(t)
+            score = gmm.score(x, t)
+            beta = 1.0 - t
+            return f - sigma**2 * score - beta * (sigma**2 / 2) * grad_r(x)
+
+        def fkc_weight_update(x, t, dt):
+            f = sched.forward_drift(x, t)
+            sigma = sched.diffusion_coeff(t)
+            score = gmm.score(x, t)
+            rg, rv = grad_r(x), r(x)
+            beta = 1.0 - t
+            term1 = rv
+            term2 = -(beta * rg) * f
+            term3 = (beta * rg) * (sigma**2 / 2) * score
+            return (term1 + term2 + term3).squeeze(-1).squeeze(-1) * dt.abs()
+
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
+        x0 = torch.randn(self.N_PARTICLES, 1, 1)
+        traj, ess_hist = steered_reverse_sampling(
+            guided_drift, sched.diffusion_coeff, fkc_weight_update, x0, t, ess_threshold=0.95
+        )
+
+        # 1. Trajectory shape
+        assert traj.shape == (self.N_STEPS, self.N_PARTICLES, 1, 1)
+
+        # 2. ESS/N history within [0, 1] at every step
+        assert len(ess_hist) == self.N_STEPS - 1
+        for ess in ess_hist:
+            assert 0.0 <= ess <= 1.0
+
+        # Ground truth: reward-tilted density
+        xs = torch.linspace(-6, 6, 500).reshape(-1, 1, 1)
+        log_p_data = gmm.log_prob(xs, t=self.EPS).squeeze()
+        log_p_rew = log_p_data + (1.0 - self.EPS) * r(xs).squeeze()
+        log_p_rew = log_p_rew - log_p_rew.max()
+        p_rew = log_p_rew.exp()
+        p_rew = p_rew / torch.trapezoid(p_rew, xs.squeeze())
+
+        p_data = log_p_data.exp()
+        p_data = p_data / torch.trapezoid(p_data, xs.squeeze())
+
+        # Build histogram of final samples
+        x_final = traj[-1, :, 0, 0]
+        xs_flat = xs.squeeze()
+        dx = xs_flat[1] - xs_flat[0]
+        bin_edges = torch.cat([(xs_flat[0] - dx / 2).unsqueeze(0), xs_flat + dx / 2])
+        hist, _ = torch.histogram(x_final, bins=bin_edges, density=True)
+
+        # 4. L2 vs reward-tilted target < 0.1
+        l2_rew = torch.sqrt(((hist - p_rew) ** 2).mean()).item()
+        assert l2_rew < 0.1, f"center={reward_center} sigma={reward_sigma}: L2 vs reward-tilted={l2_rew:.4f}"
+
+        # 5. Steered samples closer to reward-tilted target than unguided
+        l2_data = torch.sqrt(((hist - p_data) ** 2).mean()).item()
+        assert (
+            l2_rew < l2_data
+        ), f"center={reward_center} sigma={reward_sigma}: L2 reward={l2_rew:.4f} should be < L2 unguided={l2_data:.4f}"
+
+        # Uncomment to visualise in debug mode:
+        self._plot(xs_flat, p_data, p_rew, hist, x_final, reward_center, reward_sigma)
+        pass
 
 
 class TestDeviceHandling:
