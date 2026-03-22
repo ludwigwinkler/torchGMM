@@ -35,6 +35,8 @@ $$\nabla_x \log p_t(x \mid x_0) = -\frac{x - \alpha_t x_0}{\sigma_t^2} = -\frac{
 
 ## 4. Deriving the Velocity Field from the Score
 
+### Tweedie Approach
+
 The marginal velocity field is the expected instantaneous rate of change, conditioned on the current state:
 
 $$v_t(x) = \mathbb{E}\!\left[\frac{dx_t}{dt}\;\Big|\; x_t = x\right]$$
@@ -74,6 +76,30 @@ $$
 $$\boxed{v_t(x) = \frac{\dot{\alpha}_t}{\alpha_t}\, x \;+\; \left(\frac{\dot{\alpha}_t\, \sigma_t^2}{\alpha_t} - \dot{\sigma}_t\, \sigma_t\right) s_t(x)}
 $$
 
+### Algebra Appproach
+
+$$
+\text{I}: x_t = \alpha_t x_0 + \sigma_t \epsilon \\
+\text{II}: v_t(x_t) = \dot{\alpha}_t x_0 + \dot{\sigma}_t \epsilon
+$$
+
+We'll try to express the velocity $v_t$ purely in terms of the noise $\epsilon$ and the schedule parameters. For that we subtract $\text{II}$ from $\text{I}$ while matching the $x_0$ components.
+$$
+\dot{\alpha}_t \text{I}: \dot{\alpha}_t x_t = \alpha_t \dot{\alpha}_t x_0 + \dot{\alpha}_t \sigma_t \epsilon \\ 
+\alpha_t \text{II}: \alpha_t v_t(x_t) = \alpha_t \dot{\alpha}_t x_0 + \alpha_t \dot{\sigma}_t \epsilon
+$$
+
+$$
+\dot{\alpha}_t \text{I} - \alpha_t \text{II}: \dot{\alpha}_t x_t -  \alpha_t v_t(x_t) = \dot{\alpha}_t \sigma_t \epsilon - \alpha_t \dot{\sigma}_t \epsilon
+$$
+
+and we get
+$$
+\alpha_t v_t(x_t) = \dot{\alpha}_t x_t - [\dot{\alpha}_t \sigma_t - \alpha_t \dot{\sigma}_t] \epsilon \\
+v_t(x_t) = \frac{\dot{\alpha}_t}{\alpha_t} x_t - \Big[\frac{\dot{\alpha}_t}{\alpha_t} \sigma_t - \dot{\sigma}_t \Big] \epsilon \\
+v_t(x_t) = \frac{\dot{\alpha}_t}{\alpha_t} x_t + \Big[\frac{\dot{\alpha}_t}{\alpha_t} \sigma_t - \dot{\sigma}_t \Big] \sigma_t \nabla_x \log p_t(x_t)
+$$
+
 This simplifies to
 
 $$
@@ -82,7 +108,8 @@ v_t(x)
 &= \frac{\dot{\alpha}_t}{\alpha_t}\, x + \left(\frac{\dot{\alpha}_t \sigma_t^2}{\alpha_t} - \dot{\sigma}_t \sigma_t \right) s_t(x) \\
 &= \frac{-x}{1-t} + \left(\frac{-t^2}{1-t} - t\right) s_t(x)\\
 &= \frac{-x}{1-t} + \left(\frac{-t^2}{1-t} - t\frac{1-t}{1-t}\right) s_t(x) \\
-&= \frac{-x}{1-t} + \left(\frac{-t^2 - t+t^2}{1-t}\right) s_t(x)
+&= \frac{-x}{1-t} + \left(\frac{-t^2 - t+t^2}{1-t}\right) s_t(x) \\
+&= \frac{-x}{1-t} + \left(\frac{-t}{1-t}\right) s_t(x)
 \end{align*}
 $$
 
