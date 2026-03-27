@@ -9,7 +9,15 @@ class Schedule(torch.nn.Module):
 
     Any schedule must provide (α_t, σ_t) and their time derivatives (α̇_t, σ̇_t).
     Boundary conditions: α₀ = 1, σ₀ = 0 (data) and α₁ ≈ 0, σ₁ ≈ 1 (noise).
+
+    All methods clamp t to [eps, 1-eps] to avoid division-by-zero singularities
+    at the boundaries (e.g. 1/(1-t) at t=1, or 1/σ_t at t=0).
     """
+
+    eps: float = 1e-2  # small offset to avoid boundary singularities
+
+    def _clamp_t(self, t: torch.Tensor) -> torch.Tensor:
+        return t.clamp(self.eps, 1.0 - self.eps)
 
     def get_alpha_t(self, t: torch.Tensor) -> torch.Tensor:
         """Signal coefficient α_t."""
@@ -33,10 +41,12 @@ class Schedule(torch.nn.Module):
 
     def forward_drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Forward SDE drift f(x,t) = (α̇_t / α_t) x."""
+        t = self._clamp_t(t)
         return (self.get_dalpha_dt(t) / self.get_alpha_t(t)).unsqueeze(-1) * x
 
     def diffusion_coeff(self, t: torch.Tensor) -> torch.Tensor:
         """Forward SDE diffusion g(t) where g²(t) = 2(σ̇_t σ_t − α̇_t σ_t² / α_t)."""
+        t = self._clamp_t(t)
         alpha_t = self.get_alpha_t(t)
         sigma_t = self.get_sigma_t(t)
         dalpha_dt = self.get_dalpha_dt(t)
@@ -87,6 +97,7 @@ class BetaSchedule(Schedule):
 
         Derived from σ_t² = 1 - α_t², so 2σ_t σ̇_t = -2α_t α̇_t = β(t) α_t².
         """
+        t = self._clamp_t(t)
         alpha_t = self.get_alpha_t(t)
         sigma_t = self.get_sigma_t(t)
         return 0.5 * self.beta(t) * alpha_t**2 / sigma_t
@@ -131,8 +142,10 @@ class LinearSchedule(Schedule):
 
     def forward_drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """f(x,t) = -x / (1 − t)"""
+        t = self._clamp_t(t)
         return -x / (1 - t).unsqueeze(-1)
 
     def diffusion_coeff(self, t: torch.Tensor) -> torch.Tensor:
         """g(t) = √(2t / (1 − t))"""
+        t = self._clamp_t(t)
         return torch.sqrt(2 * t / (1 - t))

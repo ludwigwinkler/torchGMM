@@ -7,14 +7,15 @@ from torch.distributions import Categorical, MixtureSameFamily, MultivariateNorm
 from torchGMM.schedule import BetaSchedule, LinearSchedule, Schedule
 
 """
-TimeDependentGMM: GMM with params [*B, K, D]. Two shapes only:
+GMM: Gaussian Mixture Model with time-dependent diffusion schedule.
+Params [*B, K, D]. Two shapes only:
 - Batch shape B (from init). Sample shape N (optional leading dims).
 - x: [*B, D] or [*N, *B, D]. t: [*B] or [*N, *B] (scalar per batch; no event dim).
 - Outputs: log_prob/energy -> [*N, *B], score -> [*N, *B, D], sample(shape, t) -> [*N, *B, D].
 """
 
 
-class TimeDependentGMM(torch.nn.Module):
+class GMM(torch.nn.Module):
     def __init__(
         self,
         mu: torch.Tensor,
@@ -30,9 +31,9 @@ class TimeDependentGMM(torch.nn.Module):
             weight: [..., k] - mixture weights for batched GMMs, each with k components
             schedule: Optional Schedule. If not provided, defaults to BetaSchedule(beta_min=0.1, beta_max=20.0).
         """
-        assert (mu is not None and sigma is not None and weight is not None) or (
-            mu is not None
-        ), "Mu, sigma, and weight must be provided or just mu"
+        assert (mu is not None and sigma is not None and weight is not None) or (mu is not None), (
+            "Mu, sigma, and weight must be provided or just mu"
+        )
         mu = torch.as_tensor(mu)
         assert mu.dim() >= 2, f"mu must be at least 2D [*, k, d], got {mu.shape}"
         sigma = (
@@ -42,9 +43,9 @@ class TimeDependentGMM(torch.nn.Module):
             mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.as_tensor(weight)
         )  # no weight → single uniform component
 
-        assert (
-            mu.shape[:-1] == sigma.shape[:-1] == weight.shape
-        ), f"mu/sigma/weight leading shapes must match: mu {mu.shape}, sigma {sigma.shape}, weight {weight.shape}"
+        assert mu.shape[:-1] == sigma.shape[:-1] == weight.shape, (
+            f"mu/sigma/weight leading shapes must match: mu {mu.shape}, sigma {sigma.shape}, weight {weight.shape}"
+        )
 
         # mu is [K, D]: no explicit batch dim provided → wrap into a single-element batch [1, K, D]
         if mu.dim() == 2:
@@ -54,9 +55,9 @@ class TimeDependentGMM(torch.nn.Module):
 
         assert sigma.shape == mu.shape, f"sigma must match mu shape, got {sigma.shape} vs {mu.shape}"
         assert weight.shape == mu.shape[:-1], f"weight must be [..., k], got {weight.shape}"
-        assert (
-            mu.shape[-2] == weight.shape[-1]
-        ), f"Number of components must match: mu {mu.shape[-2]}, weight {weight.shape[-1]}"
+        assert mu.shape[-2] == weight.shape[-1], (
+            f"Number of components must match: mu {mu.shape[-2]}, weight {weight.shape[-1]}"
+        )
 
         self._validate_positive_tensor("sigma", sigma)
         self._validate_positive_tensor("weight", weight)
@@ -134,9 +135,9 @@ class TimeDependentGMM(torch.nn.Module):
 
     def _gmm_t(self, t: torch.Tensor) -> MixtureSameFamily:
         """Marginal GMM at time t. t: [*N, *B]. Returns MixtureSameFamily with batch_shape=t.shape, event_shape=(D,)."""
-        assert (
-            t.shape[-self.batch_ndim :] == self.batch_shape
-        ), f"t must have trailing dims batch_shape {self.batch_shape}, got {t.shape}"
+        assert t.shape[-self.batch_ndim :] == self.batch_shape, (
+            f"t must have trailing dims batch_shape {self.batch_shape}, got {t.shape}"
+        )
         # t [*N, *B], self.mu / self.sigma / self.weight [*B, K, D] or [*B, K]
         alpha_t, sigma_t = self.schedule.get_alpha_t_sigma_t(t)  # [*N, *B]
         # [*N,*B,1,1] * [*B,K,D] -> [*N,*B,K,D]
@@ -151,7 +152,7 @@ class TimeDependentGMM(torch.nn.Module):
         mix = Categorical(batched_probs)
         return MixtureSameFamily(mix, component)
 
-    def marginal_gmm(self, dim) -> "TimeDependentGMM":
+    def marginal_gmm(self, dim) -> "GMM":
         """
         Get marginal GMM distribution for batched GMMs.
 
@@ -159,7 +160,7 @@ class TimeDependentGMM(torch.nn.Module):
             dim: int - dimension to marginalize out
 
         Returns:
-            TimeDependentGMM with a single dimension for the marginal GMM
+            GMM with a single dimension for the marginal GMM
         Notes
         -----
         For a 2D Gaussian mixture with independent coordinates per component,
@@ -178,9 +179,9 @@ class TimeDependentGMM(torch.nn.Module):
         mu_marginal = self.mu[..., dim].unsqueeze(-1)  # [..., k, 1]
         sigma_marginal = self.sigma[..., dim].unsqueeze(-1)  # [..., k, 1]
 
-        return TimeDependentGMM(mu_marginal, sigma_marginal, self.weight, self.schedule)
+        return GMM(mu_marginal, sigma_marginal, self.weight, self.schedule)
 
-    def drop_mode(self, component_index: int) -> "TimeDependentGMM":
+    def drop_mode(self, component_index: int) -> "GMM":
         """
         Drop a component from all GMMs in the batch.
         """
@@ -199,14 +200,14 @@ class TimeDependentGMM(torch.nn.Module):
         # Renormalize weights for each GMM in batch
         weight_new = weight_new / weight_new.sum(dim=-1, keepdim=True)
 
-        return TimeDependentGMM(mu_new, sigma_new, weight_new, self.schedule)
+        return GMM(mu_new, sigma_new, weight_new, self.schedule)
 
     def log_prob(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
         """log_prob(x, t) -> [*N, *B]. x: [*N, *B, D], t: scalar or shape x.shape[:-1], with t in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
-        assert (
-            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
-        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
+            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        )
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
@@ -224,9 +225,9 @@ class TimeDependentGMM(torch.nn.Module):
         raise NotImplementedError("CDF not implemented for time dependent GMMs")
         """cdf(x, t) -> [*N, *B]. Only 1D (D=1). x: [*N, *B, 1], t: [*B] or [*N, *B] (or scalar)."""
         assert x.shape[-1] == self.dim == 1, f"CDF only supports 1D, got x.shape={x.shape}, self.dim={self.dim}"
-        assert (
-            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
-        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
+            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        )
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
         x_flat = x.reshape(-1, *self.batch_shape, 1)
@@ -248,9 +249,9 @@ class TimeDependentGMM(torch.nn.Module):
     def score(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
         """score(x, t) -> [*N, *B, D]. ∇_x log p(x). x: [*N, *B, D], t: scalar or shape x.shape[:-1] in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
-        assert (
-            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
-        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
+            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        )
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
@@ -265,9 +266,9 @@ class TimeDependentGMM(torch.nn.Module):
         using Tweedie: E[x_0|x_t] = (x + σ² score) / α, E[ε|x_t] = -σ score.
         """
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
-        assert (
-            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
-        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
+            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
+        )
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)  # [*N, *B]
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
@@ -295,21 +296,21 @@ class TimeDependentGMM(torch.nn.Module):
             sample_shape = (shape,)
         elif isinstance(shape, tuple):
             # full shape tuple → must end with batch_shape; leading dims become sample dims
-            assert (
-                shape[-self.batch_ndim :] == self.batch_shape
-            ), f"shape must end with batch_shape {self.batch_shape}, got {shape}"
+            assert shape[-self.batch_ndim :] == self.batch_shape, (
+                f"shape must end with batch_shape {self.batch_shape}, got {shape}"
+            )
             sample_shape = shape[: -self.batch_ndim]
         t_exp = self._expand_t(t, sample_shape)
-        assert (
-            t_exp.shape == sample_shape + self.batch_shape
-        ), f"t_exp must have shape {sample_shape+self.batch_shape}, got {t_exp.shape}"
+        assert t_exp.shape == sample_shape + self.batch_shape, (
+            f"t_exp must have shape {sample_shape + self.batch_shape}, got {t_exp.shape}"
+        )
         return self._gmm_t(t_exp).sample()
 
     def __repr__(self):
-        return f"TimeDependentGMM(mu={self.mu.shape}, sigma={self.sigma.shape}, weight={self.weight.shape})"
+        return f"GMM(mu={self.mu.shape}, sigma={self.sigma.shape}, weight={self.weight.shape})"
 
 
-class Conditional(TimeDependentGMM):
+class Conditional(GMM):
     """Wraps a single point x0 as a single-component GMM (near-delta distribution).
 
     Args:
@@ -327,3 +328,7 @@ class Conditional(TimeDependentGMM):
 
     def __repr__(self):
         return f"Conditional(x0={self.mu.squeeze(-2).shape}, batch_shape={self.batch_shape}, schedule={type(self.schedule).__name__})"
+
+
+# Backward compatibility alias
+TimeDependentGMM = GMM

@@ -1,5 +1,5 @@
 import torch, einops
-from torchGMM import TimeDependentGMM, Conditional
+from torchGMM import GMM, Conditional
 from torchGMM.sampling import forward_sampling, reverse_sampling
 from torchGMM.schedule import LinearSchedule, BetaSchedule
 from torch.distributions import MultivariateNormal
@@ -27,7 +27,7 @@ sigma = torch.tensor([0.3, 0.1, 0.2]).reshape(1, 3, 1)
 weight = torch.tensor([0.33, 0.5, 0.1]).reshape(1, 3)
 
 schedule = LinearSchedule()
-gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 x_grid_b = torch.linspace(-5, 5, 100).reshape(-1, 1, 1)  # [N, B=1, D=1]
 plt.plot(x_grid_b.squeeze(), gmm.log_prob(x_grid_b, t=0.0).exp().squeeze())
 plt_show()
@@ -60,7 +60,7 @@ assert score.shape == (100, 5, 1)
 # The SDE formulation has f(x,t) = -x/(1-t) and g(t) = sqrt(2t/(1-t)) which blow up
 # near t=1, making Euler-Maruyama unstable. The ODE is well-behaved everywhere.
 eps = 1e-3
-gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 colors = plt.cm.get_cmap("viridis", x0.shape[0])
 
 t = torch.linspace(eps, 1.0 - eps, 200)
@@ -76,7 +76,7 @@ plt_show()
 # %%[markdown]
 # # Reverse Flow Matching
 schedule = LinearSchedule()
-gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 x = torch.randn(10_000, 1, 1)  # [N, B=1, D=1]
 colors = plt.cm.get_cmap("viridis", x0.shape[0])
@@ -100,7 +100,7 @@ plt_show()
 # %%[markdown]
 # # Reverse Flow Matching with SDE sampling
 schedule = LinearSchedule()
-gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 x = torch.randn(10_000, 1, 1)  # [N, B=1, D=1]
 colors = plt.cm.get_cmap("viridis", x0.shape[0])
@@ -130,7 +130,7 @@ plt_show()
 # # Reverse BetaSchedule with SDE sampling
 
 schedule = BetaSchedule()
-gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 x = torch.randn(10_000, 1, 1)  # [N, B=1, D=1]
 colors = plt.cm.get_cmap("viridis", x0.shape[0])
@@ -260,7 +260,7 @@ _gs = gridspec.GridSpec(4, 3, figure=_fig, width_ratios=[1, 6, 1], wspace=0.05, 
 
 for _row, (_title, _sched_cls, _mode) in enumerate(_cases):
     _sched = _sched_cls()
-    _gmm = TimeDependentGMM(mu=_mu, sigma=_sigma, weight=_weight, schedule=_sched)
+    _gmm = GMM(mu=_mu, sigma=_sigma, weight=_weight, schedule=_sched)
 
     _t_fwd, _fwd = _fwd_traj(_mode, _sched, _gmm, _gamma, _eps, _n_samples, _n_steps)
     _t_rev, _rev = _rev_traj(_mode, _sched, _gmm, _gamma, _eps, _n_samples, _n_steps)

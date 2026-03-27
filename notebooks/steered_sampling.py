@@ -1,6 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
-from torchGMM import TimeDependentGMM
+from torchGMM import GMM
 from torchGMM.sampling import steered_reverse_sampling
 from torchGMM.schedule import BetaSchedule
 from tqdm import tqdm
@@ -13,7 +13,7 @@ torch.set_default_device(device)
 
 # --- model ---
 sched = BetaSchedule()
-gmm = TimeDependentGMM(
+gmm = GMM(
     mu=torch.tensor([[[-2.5], [2.5]]]),
     sigma=torch.tensor([[[0.8], [0.8]]]),
     weight=torch.tensor([[0.2, 0.8]]),

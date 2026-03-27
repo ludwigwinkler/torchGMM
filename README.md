@@ -58,7 +58,7 @@ Requires Python ≥ 3.10 and PyTorch ≥ 2.7.
 
 ```python
 import torch
-from torchGMM import TimeDependentGMM, BetaSchedule
+from torchGMM import GMM, BetaSchedule
 
 # 2-component mixture in 2D
 mu     = torch.tensor([[-2.0, 0.0],
@@ -66,7 +66,7 @@ mu     = torch.tensor([[-2.0, 0.0],
 sigma  = torch.ones(1, 2, 2) * 0.5                    # [1, K=2, D=2]
 weight = torch.tensor([[0.3, 0.7]])                    # [1, K=2]
 
-gmm = TimeDependentGMM(mu, sigma, weight)
+gmm = GMM(mu, sigma, weight)
 
 # Exact log-probability at noise level t = 0.4
 x = torch.randn(1000, 1, 2)          # [N, *B, D]
@@ -100,11 +100,11 @@ traj_rev = reverse_diffusion(schedule, gmm.score, x_noise, t_rev)
 ### Conditional Process
 
 ```python
-from torchGMM import TimeDependentGMM
+from torchGMM import GMM
 
 # Conditional on a single starting point x0
 x0 = torch.tensor([[1.0, -1.0]])          # [1, D=2]
-cond = TimeDependentGMM.Conditional(x0)   # single-component GMM at x0
+cond = GMM.Conditional(x0)   # single-component GMM at x0
 
 # Score of the conditional forward process
 s = cond.score(x, t=0.6)

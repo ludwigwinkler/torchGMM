@@ -6,7 +6,7 @@ import torch
 
 torch.set_printoptions(sci_mode=False)
 from torchGMM.sampling import forward_sampling, reverse_sampling, steered_reverse_sampling
-from torchGMM.gmm import TimeDependentGMM
+from torchGMM.gmm import GMM
 from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 
@@ -26,7 +26,7 @@ def gmm_model():
     mu = torch.tensor([-2, 0, 2]).reshape(1, 3, 1)
     sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
     weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
-    return TimeDependentGMM(mu=mu, sigma=sigma, weight=weight)
+    return GMM(mu=mu, sigma=sigma, weight=weight)
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def batched_gmm_model():
     mu = torch.tensor([[-1, 0.5, 1.5], [-2, 0, 2]]).reshape(2, 3, 1)
     sigma = torch.tensor([[0.3, 0.3, 0.2], [0.3, 0.3, 0.2]]).reshape(2, 3, 1)
     weight = torch.tensor([[1 / 3, 1 / 2, 1 / 6], [0.33, 0.5, 0.17]]).reshape(2, 3)
-    return TimeDependentGMM(mu=mu, sigma=sigma, weight=weight)
+    return GMM(mu=mu, sigma=sigma, weight=weight)
 
 
 def _histogram_setup():
@@ -64,7 +64,7 @@ class TestForwardSampling:
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
         schedule = schedule_cls()
-        gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         n_samples, n_steps = 10_000, 200
         x = gmm.sample(shape=n_samples, t=t_start)  # [N, B=1, D=1]
@@ -100,7 +100,7 @@ class TestForwardSampling:
         sigma = torch.tensor([[0.3, 0.3, 0.2], [0.2, 0.4, 0.3]]).reshape(2, 3, 1)
         weight = torch.tensor([[0.33, 0.5, 0.17], [0.25, 0.5, 0.25]]).reshape(2, 3)
         schedule = schedule_cls()
-        gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         n_samples, n_steps = 50_000, 200
         t = torch.linspace(self.t_eps, 1 - self.t_eps, n_steps)
@@ -170,7 +170,7 @@ class TestReverseSampling:
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
         schedule = schedule_cls()
-        gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         n_samples, n_steps = 10_000, 200
         t_start = 1.0 - self.eps  # p_{t_start} ≈ N(0, I) for both schedules
@@ -214,7 +214,7 @@ class TestReverseSampling:
         sigma = torch.tensor([[0.3, 0.3, 0.2], [0.2, 0.4, 0.3]]).reshape(2, 3, 1)
         weight = torch.tensor([[0.33, 0.5, 0.17], [0.25, 0.5, 0.25]]).reshape(2, 3)
         schedule = schedule_cls()
-        gmm = TimeDependentGMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         # BetaSchedule: no singularity at t=1. FlowMatching: 1/(1-t) singularity → start at 1-eps.
         x = torch.randn(50_000, 2, 1)
@@ -337,7 +337,7 @@ class TestSteeredSampling:
     @pytest.fixture
     def setup(self):
         sched = BetaSchedule(beta_min=0.1, beta_max=20.0)
-        gmm = TimeDependentGMM(
+        gmm = GMM(
             mu=torch.tensor([[[-2.5], [2.5]]]),
             sigma=torch.tensor([[[0.8], [0.8]]]),
             weight=torch.tensor([[0.2, 0.8]]),

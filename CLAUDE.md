@@ -30,7 +30,7 @@ black src tests && isort src tests && flake8 src tests
 ## Architecture
 
 **Public API** (`src/torchGMM/__init__.py`):
-- `TimeDependentGMM` — batched GMM with diffusion schedule; core class
+- `GMM` — batched GMM with diffusion schedule; core class
 - `Conditional` — wraps a single point x0 as a single-component GMM
 - `Schedule` — base class for interpolation schedules
 - `BetaSchedule` — VP-SDE schedule with linear β(t); satisfies α_t² + σ_t² = 1
@@ -39,7 +39,7 @@ black src tests && isort src tests && flake8 src tests
 
 **Key abstractions:**
 
-`TimeDependentGMM(mu, sigma, weight, schedule)` — `torch.nn.Module` with params shaped `[*B, K, D]` (batch × components × dimensions). All methods accept inputs shaped `[*N, *B, D]` and return:
+`GMM(mu, sigma, weight, schedule)` — `torch.nn.Module` with params shaped `[*B, K, D]` (batch × components × dimensions). All methods accept inputs shaped `[*N, *B, D]` and return:
 - Scalars like `log_prob` / `energy`: `[*N, *B]`
 - Vectors like `score` / `sample`: `[*N, *B, D]`
 

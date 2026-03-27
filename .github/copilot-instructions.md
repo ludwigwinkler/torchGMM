@@ -25,8 +25,8 @@ black src tests && isort src tests && flake8 src tests
 ## Architecture
 
 **Core abstractions** (all in `src/torchGMM/`):
-- `TimeDependentGMM` — Batched GMM with diffusion schedule. Params are `[*B, K, D]` (batch, components, dims). Supports `log_prob`, `score`, `sample`, `energy` with time `t ∈ [0,1]`.
-- `Conditional` — Subclass of `TimeDependentGMM` for conditional processes from a single point `x0`.
+- `GMM` — Batched GMM with diffusion schedule. Params are `[*B, K, D]` (batch, components, dims). Supports `log_prob`, `score`, `sample`, `energy` with time `t ∈ [0,1]`.
+- `Conditional` — Subclass of `GMM` for conditional processes from a single point `x0`.
 - `BetaSchedule` — Linear β schedule for the forward SDE. Provides `alpha_t`, `sigma_t` coefficients.
 - `forward_diffusion` / `reverse_diffusion` — Euler-Maruyama simulation of the SDE.
 

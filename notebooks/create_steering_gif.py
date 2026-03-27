@@ -18,7 +18,7 @@ import matplotlib.gridspec as gridspec
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.stats import norm
 from pathlib import Path
-from torchGMM import TimeDependentGMM, BetaSchedule, forward_sampling, reverse_sampling
+from torchGMM import GMM, BetaSchedule, forward_sampling, reverse_sampling
 from torchGMM.sampling import steered_reverse_sampling
 
 plt.style.use("default")
@@ -56,7 +56,7 @@ sigma = torch.tensor([[[1.0], [1.0]]])  # [1, K=2, D=1]
 weight = torch.tensor([[0.7, 0.3]])  # [1, K=2]
 
 schedule = BetaSchedule(beta_min=0.1, beta_max=20.0)
-gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
+gmm = GMM(mu, sigma, weight, schedule=schedule)
 
 # ---------------------------------------------------------------------------
 # Reward

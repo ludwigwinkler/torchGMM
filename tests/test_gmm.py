@@ -4,7 +4,7 @@ import einops
 import pytest
 import torch
 
-from torchGMM.gmm import Conditional, TimeDependentGMM
+from torchGMM.gmm import Conditional, GMM
 from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 
@@ -24,7 +24,7 @@ def simple_gmm_2d():
     mu = torch.tensor([[-1.0, 0.0], [1.0, 0.0]]).unsqueeze(0)  # [BS=1, k=2, d=2]
     sigma = torch.tensor([[0.5, 0.5], [0.5, 0.5]]).unsqueeze(0)  # [BS=1, k=2, d=2]
     weight = torch.tensor([0.5, 0.5]).unsqueeze(0)  # [BS=1, k=2]
-    gmm = TimeDependentGMM(mu, sigma, weight)
+    gmm = GMM(mu, sigma, weight)
 
     # Expected statistics for t=0 (no diffusion)
     # Mean: weighted average of component means = 0.5*[-1,0] + 0.5*[1,0] = [0,0]
@@ -56,7 +56,7 @@ class TestShapes:
         mu = torch.ones(mu_shape)
         sigma = torch.ones(sigma_shape) * 0.5
         weight = torch.ones(weight_shape)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         assert gmm.num_components == expected_num_components
         assert gmm.dim == expected_dim
         assert gmm.batch_shape == expected_batch_shape
@@ -77,7 +77,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)  # [B1, B2, K, D]
         sigma = torch.ones(5, 4, 3, 2) * 0.5  # [B1, B2, K, D]
         weight = torch.ones(5, 4, 3)  # [B1, B2, K]
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         samples = gmm.sample(shape=shape, t=t)
         assert samples.shape == expected_shape, f"Expected {expected_shape}, got {samples.shape}"
 
@@ -94,7 +94,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         x = torch.randn(*x_shape)
         log_p = gmm.log_prob(x, t=t)
         assert log_p.shape == expected_shape, f"Expected {expected_shape}, got {log_p.shape}"
@@ -112,7 +112,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         x = torch.randn(*x_shape)
         score = gmm.score(x, t=t)
         assert score.shape == expected_shape, f"Expected {expected_shape}, got {score.shape}"
@@ -134,7 +134,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         t_exp = gmm._expand_t(t, sample_shape)
         assert t_exp.shape == sample_shape_expected, f"Expected (*{sample_shape}, 5, 4), got {t_exp.shape}"
 
@@ -143,7 +143,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         x = torch.randn(50, 5, 4, 2)  # [N, B, D], batch_shape=(5, 4)
         t_bad = torch.rand(50, 2)  # wrong trailing dims; need (5, 4) or (50, 5, 4)
         with pytest.raises(ValueError, match="t must be of shape"):
@@ -161,7 +161,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         x_bad = torch.randn(*x_shape)
         with pytest.raises(AssertionError, match=expected_message):
             gmm.log_prob(x_bad, t=0.5)
@@ -173,7 +173,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         x = torch.randn(50, 5, 4, 2)  # [N, B, D], batch_shape=(5, 4)
         t_bad = torch.rand(5, 2)  # wrong trailing dims; need (5, 4) or (50, 5, 4)
         with pytest.raises(ValueError, match="t must be of shape"):
@@ -184,7 +184,7 @@ class TestShapes:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         t_bad = torch.rand(5, 2)  # wrong batch dims; need (5, 4)
         with pytest.raises(ValueError, match="t must be of shape"):
             gmm.sample(shape=None, t=t_bad)
@@ -194,11 +194,11 @@ class TestShapes:
         mu1 = torch.randn(1, 5, 2)
         sigma1 = torch.ones(1, 5, 2) * 0.5
         weight1 = torch.ones(1, 5)
-        gmm_single_batch = TimeDependentGMM(mu1, sigma1, weight1)
+        gmm_single_batch = GMM(mu1, sigma1, weight1)
         mu2 = torch.randn(2, 5, 2)
         sigma2 = torch.ones(2, 5, 2) * 0.5
         weight2 = torch.ones(2, 5)
-        gmm_multiple_batch = TimeDependentGMM(mu2, sigma2, weight2)
+        gmm_multiple_batch = GMM(mu2, sigma2, weight2)
         x_single = torch.randn(50, 1, 2)  # [N, B=1, D]
         x_multi = torch.randn(50, 2, 2)  # [N, B=2, D]
         score_single = gmm_single_batch.score(x_single, t=0.5)
@@ -219,8 +219,8 @@ class TestDistribution:
         mu = torch.randn(4, 1, 2)
         sigma = torch.zeros(4, 1, 2) + 1e-10
         weight = torch.ones(4, 1)
-        gmm = TimeDependentGMM(mu, sigma, weight)  # GMM with mu and superfluous sigma, weight
-        conditional = TimeDependentGMM(mu)  # Conditional GMM with only mu=x0
+        gmm = GMM(mu, sigma, weight)  # GMM with mu and superfluous sigma, weight
+        conditional = GMM(mu)  # Conditional GMM with only mu=x0
         alpha_t, sigma_t = gmm.schedule.get_alpha_t_sigma_t(torch.scalar_tensor(t))
         # Compute the true mean and variance of the forward process [batch=4,component=1,dim=2) -> x0=[batch=4,dim=2]
         true_mean = alpha_t * mu.squeeze(1)
@@ -248,8 +248,8 @@ class TestDistribution:
         mu = torch.randn(4, 1, 2)
         sigma = torch.zeros(4, 1, 2) + 1e-10
         weight = torch.ones(4, 1)
-        gmm = TimeDependentGMM(mu, sigma, weight)  # GMM with mu and superfluous sigma, weight
-        conditional = TimeDependentGMM(mu)  # Conditional GMM with only mu=x0
+        gmm = GMM(mu, sigma, weight)  # GMM with mu and superfluous sigma, weight
+        conditional = GMM(mu)  # Conditional GMM with only mu=x0
 
         # For scalar time, compute true parameters
         t_scalar = torch.scalar_tensor(t)
@@ -288,7 +288,7 @@ class TestGMMProperties:
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
         weight = torch.ones(1, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
 
         x = torch.randn(50, 1, 2)  # [N, B, D]
         log_p = gmm.log_prob(x, t=0.5)
@@ -303,7 +303,7 @@ class TestGMMProperties:
         mu = torch.randn(4, 3, 2)
         sigma = torch.ones(4, 3, 2) * 0.5
         weight = torch.ones(4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
 
         x = torch.randn(10, 4, 2)  # [N, B, D]
         score = gmm.score(x, t=0.5)
@@ -319,7 +319,7 @@ class TestGMMProperties:
 
 
 class Test2DMarginalizedDistributions:
-    """Test marginal distribution extraction from TimeDependentGMM"""
+    """Test marginal distribution extraction from GMM"""
 
     def test_marginal_2d_empirical_comparison(self):
         """Compare empirical histograms with analytical marginal distributions"""
@@ -327,7 +327,7 @@ class Test2DMarginalizedDistributions:
         mu = torch.tensor([[2.0, -2.0], [-2.0, 3.0], [0.0, 0.0]]).unsqueeze(0)  # [1, 3, 2]
         sigma = torch.tensor([[0.5, 0.4], [0.5, 0.5], [0.3, 0.4]]).unsqueeze(0)  # [1, 3, 2]
         weight = torch.tensor([0.3, 0.4, 0.3]).unsqueeze(0)  # [1, 3]
-        gmm_2d = TimeDependentGMM(mu, sigma, weight)
+        gmm_2d = GMM(mu, sigma, weight)
 
         # Sample from the GMM: [n_samples, BS=1, Dim=2]
         n_samples = 100_000
@@ -377,9 +377,9 @@ class TestTemperatureSampling:
         mu = torch.randn(1, 1, 1)
         sigma = torch.ones(1, 1, 1) * 0.5
         weight = torch.ones(1, 1)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         for temperature in [0.01, 0.1, 0.5, 1.0, 2.0, 5.0]:
-            temperature_gmm = TimeDependentGMM(mu, sigma / temperature**0.5, weight)
+            temperature_gmm = GMM(mu, sigma / temperature**0.5, weight)
             # Build a two dimensional meshgrid with points
             x_min, x_max, n_points = -3.0, 3.0, 100
             x_grid = torch.linspace(x_min, x_max, n_points)
@@ -404,10 +404,10 @@ class TestTemperatureSampling:
         mu = torch.randn(1, 1, 1)
         sigma = torch.ones(1, 1, 1) * 0.5
         weight = torch.ones(1, 1)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
 
         for temperature in [0.5, 1.0, 2.0]:
-            temperature_gmm = TimeDependentGMM(mu, sigma / temperature**0.5, weight)
+            temperature_gmm = GMM(mu, sigma / temperature**0.5, weight)
 
             # Sample from p, reweight by p^(β-1), resample
             n_particles = 100_000
@@ -465,7 +465,7 @@ class TestConditional:
 
 
 class TestVelocity:
-    """Test velocity computation on TimeDependentGMM"""
+    """Test velocity computation on GMM"""
 
     @pytest.mark.parametrize(
         "x_shape, t, expected_shape",
@@ -480,7 +480,7 @@ class TestVelocity:
         mu = torch.randn(5, 4, 3, 2)
         sigma = torch.ones(5, 4, 3, 2) * 0.5
         weight = torch.ones(5, 4, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight)
+        gmm = GMM(mu, sigma, weight)
         x = torch.randn(*x_shape)
         v = gmm.velocity(x, t=t)
         assert v.shape == expected_shape, f"Expected {expected_shape}, got {v.shape}"
@@ -492,7 +492,7 @@ class TestVelocity:
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
         weight = torch.ones(1, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
+        gmm = GMM(mu, sigma, weight, schedule=schedule)
 
         t_val = 0.5
         x = torch.randn(20, 1, 2)
@@ -524,7 +524,7 @@ class TestVelocity:
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
         weight = torch.ones(1, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
+        gmm = GMM(mu, sigma, weight, schedule=schedule)
 
         t_val = 0.4
         x = torch.randn(20, 1, 2)
@@ -547,7 +547,7 @@ class TestVelocity:
         mu = torch.randn(1, 3, 2)
         sigma = torch.ones(1, 3, 2) * 0.5
         weight = torch.ones(1, 3)
-        gmm = TimeDependentGMM(mu, sigma, weight, schedule=schedule)
+        gmm = GMM(mu, sigma, weight, schedule=schedule)
 
         t_val = 0.5
         x = torch.randn(20, 1, 2)
@@ -562,7 +562,7 @@ class TestVelocity:
 
 
 class TestDeviceHandling:
-    """Test device handling for TimeDependentGMM"""
+    """Test device handling for GMM"""
 
     @pytest.mark.parametrize("local_device", [torch.device("cpu"), get_local_device()])
     def test_log_prob_and_score_on_device(self, simple_gmm_2d, local_device):

@@ -1,10 +1,10 @@
 import torch
 
-from torchGMM.gmm import TimeDependentGMM
+from torchGMM.gmm import GMM
 from torchGMM.schedule import BetaSchedule, LinearSchedule, Schedule
 
 
-class Conditional(TimeDependentGMM):
+class Conditional(GMM):
     """
     Conditional Process class
     Instead of simulating the full GMM, we only simulate the conditional process conditioned on the initial value x0.
