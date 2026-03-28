@@ -1,12 +1,12 @@
-from sympy.utilities.lambdify import implemented_function
 import sys
 
 import pytest
 import torch
+from sympy.utilities.lambdify import implemented_function
 
 torch.set_printoptions(sci_mode=False)
-from torchGMM.sampling import forward_sampling, reverse_sampling, steered_reverse_sampling
 from torchGMM.gmm import GMM
+from torchGMM.sampling import forward_sampling, reverse_sampling, steered_reverse_sampling
 from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 

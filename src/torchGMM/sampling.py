@@ -7,8 +7,9 @@ Two functions: forward_sampling (t increasing) and reverse_sampling (t decreasin
 The user constructs drift and diffusion Callables ad-hoc before calling.
 """
 
-import torch
 from typing import Callable, Optional
+
+import torch
 
 
 def _validate_time_grid(t: torch.Tensor) -> None:

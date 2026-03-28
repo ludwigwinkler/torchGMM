@@ -11,13 +11,14 @@ Marginal densities are shown on the left (noise, t=1) and right (data, t=0) edge
 The GIF loops seamlessly: forward ↔ reverse ↔ steered.
 """
 
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
+from pathlib import Path
+
 import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.stats import norm
-from pathlib import Path
 from torchGMM import GMM, BetaSchedule, forward_sampling, reverse_sampling
 from torchGMM.sampling import steered_reverse_sampling
 
@@ -324,8 +325,9 @@ def _frame(i: int):
 
 
 # Render frames manually with per-frame durations for smooth slowdown
-from PIL import Image
 from io import BytesIO
+
+from PIL import Image
 
 pil_frames = []
 for fi in range(N_FRAMES):

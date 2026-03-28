@@ -1,17 +1,17 @@
-import torch, einops
-from torchGMM import GMM, Conditional
-from torchGMM.sampling import forward_sampling, reverse_sampling
-from torchGMM.schedule import LinearSchedule, BetaSchedule
-from torch.distributions import MultivariateNormal
+import einops
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from _utils import plt_show
+from matplotlib.cm import get_cmap
 
 # --- plotting ---
-import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
-from matplotlib.cm import get_cmap
-from _utils import plt_show
+from torch.distributions import MultivariateNormal
+from torchGMM import GMM, Conditional
+from torchGMM.sampling import forward_sampling, reverse_sampling
+from torchGMM.schedule import BetaSchedule, LinearSchedule
 from tqdm import tqdm
-import numpy as np
 
 torch.manual_seed(100)
 

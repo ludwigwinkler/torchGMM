@@ -3,8 +3,7 @@ import sys
 import einops
 import pytest
 import torch
-
-from torchGMM.gmm import Conditional, GMM
+from torchGMM.gmm import GMM, Conditional
 from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 

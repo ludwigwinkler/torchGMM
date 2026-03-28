@@ -1,5 +1,3 @@
-import numbers
-
 import einops
 import torch
 from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal, Normal
@@ -65,6 +63,9 @@ class GMM(torch.nn.Module):
         if not torch.all(weight_sum > 0):
             raise ValueError("weight sum must be > 0 for all batches")
         weight = weight / weight_sum
+        self.mu: torch.Tensor
+        self.sigma: torch.Tensor
+        self.weight: torch.Tensor
         self.register_buffer("mu", mu)
         self.register_buffer("sigma", sigma)
         self.register_buffer("weight", weight)
@@ -83,7 +84,7 @@ class GMM(torch.nn.Module):
 
         self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if schedule is None else schedule
 
-    def _expand_t(self, t: numbers.Number | torch.Tensor | None, sample_shape: tuple) -> torch.Tensor:
+    def _expand_t(self, t: int | float | torch.Tensor | None, sample_shape: tuple) -> torch.Tensor:
         """Return t with shape [*sample_shape, *batch_shape]. Accept t scalar, [*B], or [*N,*B]."""
         if t is None:
             # no t provided → assume clean data at t=0
@@ -121,7 +122,7 @@ class GMM(torch.nn.Module):
             raise ValueError(f"{name} must be > 0")
 
     @staticmethod
-    def _validate_time_range(t: numbers.Number | torch.Tensor) -> None:
+    def _validate_time_range(t: int | float | torch.Tensor) -> None:
         if isinstance(t, torch.Tensor):
             # tensor path: check element-wise so the full batch is validated at once
             if not torch.all(torch.isfinite(t)):
@@ -202,7 +203,7 @@ class GMM(torch.nn.Module):
 
         return GMM(mu_new, sigma_new, weight_new, self.schedule)
 
-    def log_prob(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def log_prob(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
         """log_prob(x, t) -> [*N, *B]. x: [*N, *B, D], t: scalar or shape x.shape[:-1], with t in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
         assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
@@ -213,15 +214,15 @@ class GMM(torch.nn.Module):
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
         return self._gmm_t(t_exp).log_prob(x)
 
-    def __call__(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
         """Alias for log_prob(x, t)."""
         return self.log_prob(x, t)
 
-    def energy(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def energy(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
         """energy(x, t) -> [*N, *B]. Returns -log_prob(x, t). t: scalar or shape x.shape[:-1] in [0, 1]."""
         return -self.log_prob(x, t)
 
-    def cdf(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def cdf(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
         raise NotImplementedError("CDF not implemented for time dependent GMMs")
         """cdf(x, t) -> [*N, *B]. Only 1D (D=1). x: [*N, *B, 1], t: [*B] or [*N, *B] (or scalar)."""
         assert x.shape[-1] == self.dim == 1, f"CDF only supports 1D, got x.shape={x.shape}, self.dim={self.dim}"
@@ -246,7 +247,7 @@ class GMM(torch.nn.Module):
         return mix_cdf_flat.reshape(*sample_shape, *self.batch_shape)
 
     @torch.enable_grad()
-    def score(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def score(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
         """score(x, t) -> [*N, *B, D]. ∇_x log p(x). x: [*N, *B, D], t: scalar or shape x.shape[:-1] in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
         assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
@@ -259,7 +260,7 @@ class GMM(torch.nn.Module):
         score = torch.autograd.grad(self._gmm_t(t_exp).log_prob(x_grad).sum(), x_grad, create_graph=False)[0].detach()
         return score
 
-    def velocity(self, x: torch.Tensor, t: numbers.Number | torch.Tensor | None = None) -> torch.Tensor:
+    def velocity(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
         """velocity(x, t) -> [*N, *B, D]. Marginal velocity field.
 
         Derived from v_t(x) = (dα/dt) E[x_0|x_t=x] + (dσ/dt) E[ε|x_t=x]
