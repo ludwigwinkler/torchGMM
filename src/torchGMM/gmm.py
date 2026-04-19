@@ -62,9 +62,9 @@ class GMM(torch.nn.Module):
             weight: [..., k] - mixture weights for batched GMMs, each with k components
             schedule: Optional Schedule. If not provided, defaults to BetaSchedule(beta_min=0.1, beta_max=20.0).
         """
-        assert (mu is not None and sigma is not None and weight is not None) or (mu is not None), (
-            "Mu, sigma, and weight must be provided or just mu"
-        )
+        assert (mu is not None and sigma is not None and weight is not None) or (
+            mu is not None
+        ), "Mu, sigma, and weight must be provided or just mu"
         mu = torch.as_tensor(mu)
         assert mu.dim() >= 2, f"mu must be at least 2D [*, k, d], got {mu.shape}"
         sigma = (
@@ -137,9 +137,9 @@ class GMM(torch.nn.Module):
 
     def _gmm_t(self, t: torch.Tensor) -> MixtureSameFamily:
         """Marginal GMM at time t. t: [*N, *B]. Returns MixtureSameFamily with batch_shape=t.shape, event_shape=(D,)."""
-        assert t.shape[-self.batch_ndim :] == self.batch_shape, (
-            f"t must have trailing dims batch_shape {self.batch_shape}, got {t.shape}"
-        )
+        assert (
+            t.shape[-self.batch_ndim :] == self.batch_shape
+        ), f"t must have trailing dims batch_shape {self.batch_shape}, got {t.shape}"
         # t [*N, *B], self.mu / self.sigma / self.weight [*B, K, D] or [*B, K]
         alpha_t, sigma_t = self.schedule.get_alpha_t_sigma_t(t)  # [*N, *B]
         # [*N,*B,1,1] * [*B,K,D] -> [*N,*B,K,D]
@@ -210,9 +210,9 @@ class GMM(torch.nn.Module):
     ) -> Float[Tensor, "*batch"]:
         """log_prob(x, t) -> [*N, *B]. x: [*N, *B, D], t: scalar or shape x.shape[:-1], with t in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
-        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
-            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
-        )
+        assert (
+            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
+        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
@@ -236,9 +236,9 @@ class GMM(torch.nn.Module):
     ) -> Float[Tensor, "*batch D"]:
         """score(x, t) -> [*N, *B, D]. ∇_x log p(x). x: [*N, *B, D], t: scalar or shape x.shape[:-1] in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
-        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
-            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
-        )
+        assert (
+            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
+        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
@@ -256,9 +256,9 @@ class GMM(torch.nn.Module):
         using Tweedie: E[x_0|x_t] = (x + σ² score) / α, E[ε|x_t] = -σ score.
         """
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
-        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
-            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
-        )
+        assert (
+            x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape
+        ), f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)  # [*N, *B]
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
@@ -290,14 +290,14 @@ class GMM(torch.nn.Module):
             sample_shape = (shape,)
         elif isinstance(shape, tuple):
             # full shape tuple → must end with batch_shape; leading dims become sample dims
-            assert shape[-self.batch_ndim :] == self.batch_shape, (
-                f"shape must end with batch_shape {self.batch_shape}, got {shape}"
-            )
+            assert (
+                shape[-self.batch_ndim :] == self.batch_shape
+            ), f"shape must end with batch_shape {self.batch_shape}, got {shape}"
             sample_shape = shape[: -self.batch_ndim]
         t_exp = self._expand_t(t, sample_shape)
-        assert t_exp.shape == sample_shape + self.batch_shape, (
-            f"t_exp must have shape {sample_shape + self.batch_shape}, got {t_exp.shape}"
-        )
+        assert (
+            t_exp.shape == sample_shape + self.batch_shape
+        ), f"t_exp must have shape {sample_shape + self.batch_shape}, got {t_exp.shape}"
         return self._gmm_t(t_exp).sample()
 
     def __repr__(self):
