@@ -1,23 +1,12 @@
-import sys
-
 import pytest
 import torch
-from sympy.utilities.lambdify import implemented_function
+from conftest import get_local_device
 
-torch.set_printoptions(sci_mode=False)
 from torchGMM.gmm import GMM
 from torchGMM.sampling import forward_sampling, reverse_sampling, steered_reverse_sampling
 from torchGMM.schedule import BetaSchedule, LinearSchedule
 
-
-def get_local_device():
-    """Fixture that returns the best available device (MPS, CUDA, or CPU)."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
+torch.set_printoptions(sci_mode=False)
 
 
 @pytest.fixture
@@ -48,7 +37,6 @@ def _histogram_setup():
 
 
 class TestForwardSampling:
-
     t_eps = 0.01
 
     @pytest.mark.parametrize(
@@ -60,6 +48,7 @@ class TestForwardSampling:
     )
     def test_forward_ode_marginals(self, schedule_cls, t_start, t_end):
         """Forward ODE histogram matches analytical GMM marginal at every sampled time step."""
+        torch.manual_seed(1)
         mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
@@ -89,13 +78,15 @@ class TestForwardSampling:
             # plt.ylim(0, 1)
             # plt.show()
             assert (hist - target).abs().max() < 0.05, (
-                f"{schedule_cls.__name__} forward ODE @ t={t_:.3f}: " f"max deviation {(hist - target).abs().max():.3f}"
+                f"{schedule_cls.__name__} forward ODE @ t={t_:.3f}: max deviation {(hist - target).abs().max():.3f}"
             )
 
+    @pytest.mark.slow
     @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule])
     @pytest.mark.parametrize("gamma", [0.1, 0.5, 1.0, 1.5], ids=lambda x: f"gamma={x}")
     def test_forward_sde_marginals(self, schedule_cls, gamma):
         """Forward SDE marginals match analytical GMM marginals at every 5 steps."""
+        torch.manual_seed(0)
         mu = torch.tensor([[-2.0, 0.0, 2.0], [-1.5, 0.5, 2.5]]).reshape(2, 3, 1)
         sigma = torch.tensor([[0.3, 0.3, 0.2], [0.2, 0.4, 0.3]]).reshape(2, 3, 1)
         weight = torch.tensor([[0.33, 0.5, 0.17], [0.25, 0.5, 0.25]]).reshape(2, 3)
@@ -166,6 +157,7 @@ class TestReverseSampling:
     )
     def test_reverse_ode_marginals(self, schedule_cls):
         """Probability flow ODE: dx = v(x,t) dt. Histogram matches analytical GMM marginal every 5 steps."""
+        torch.manual_seed(0)
         mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
@@ -173,8 +165,7 @@ class TestReverseSampling:
         gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         n_samples, n_steps = 10_000, 200
-        t_start = 1.0 - self.eps  # p_{t_start} ≈ N(0, I) for both schedules
-        x = torch.randn(n_samples, 1, 1)  # [N, B=1, D=1] — draws from p_{t_start} ≈ N(0,I)
+        x = torch.randn(n_samples, 1, 1)  # [N, B=1, D=1] — draws from p_{t_start=1-eps} ≈ N(0,I)
         t = torch.linspace(1 - self.eps, self.eps, n_steps)
         if schedule_cls is BetaSchedule:
             # Anderson reverse SDE: dx = [f − g² score] dt + g dW. Histograms match analytical marginals every 5 steps.
@@ -200,16 +191,19 @@ class TestReverseSampling:
             t_ = t[t_idx]
             target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)  # [51]
             hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
-            assert (
-                hist - target
-            ).abs().max() < 0.05, (
+            assert (hist - target).abs().max() < 0.05, (
                 f"{schedule_cls.__name__} ODE @ t={t_:.3f}: max deviation {(hist - target).abs().max():.3f}"
             )
 
+    @pytest.mark.slow
     @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule])
     @pytest.mark.parametrize("gamma", [0.1, 0.5, 1.0, 1.5], ids=lambda x: f"gamma={x}")
     def test_reverse_sde_marginals(self, schedule_cls, gamma):
-        """BetaSchedule Anderson reverse SDE: dx = [f − g² score] dt + g dW. Histograms match analytical marginals every 5 steps."""
+        """Anderson reverse SDE: dx = [f − g² score] dt + g dW.
+
+        Histograms should match analytical marginals every 5 steps.
+        """
+        torch.manual_seed(0)
         mu = torch.tensor([[-2.0, 0.0, 2.0], [-1.5, 0.5, 2.5]]).reshape(2, 3, 1)
         sigma = torch.tensor([[0.3, 0.3, 0.2], [0.2, 0.4, 0.3]]).reshape(2, 3, 1)
         weight = torch.tensor([[0.33, 0.5, 0.17], [0.25, 0.5, 0.25]]).reshape(2, 3)
@@ -439,13 +433,11 @@ class TestSteeredSampling:
 
         # 5. Steered samples closer to reward-tilted target than unguided
         l2_data = torch.sqrt(((hist - p_data) ** 2).mean()).item()
-        assert (
-            l2_rew < l2_data
-        ), f"center={reward_center} sigma={reward_sigma}: L2 reward={l2_rew:.4f} should be < L2 unguided={l2_data:.4f}"
+        assert l2_rew < l2_data, (
+            f"center={reward_center} sigma={reward_sigma}: L2 reward={l2_rew:.4f} should be < L2 unguided={l2_data:.4f}"
+        )
 
-        # Uncomment to visualise in debug mode:
-        self._plot(xs_flat, p_data, p_rew, hist, x_final, reward_center, reward_sigma)
-        pass
+        # self._plot(xs_flat, p_data, p_rew, hist, x_final, reward_center, reward_sigma)
 
 
 class TestDeviceHandling:

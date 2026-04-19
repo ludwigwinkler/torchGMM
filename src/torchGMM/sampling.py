@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 SDE/ODE sampling via Euler-Maruyama.
 
@@ -7,9 +5,11 @@ Two functions: forward_sampling (t increasing) and reverse_sampling (t decreasin
 The user constructs drift and diffusion Callables ad-hoc before calling.
 """
 
-from typing import Callable, Optional
-
 import torch
+from beartype import beartype
+from beartype.typing import Callable
+from jaxtyping import Float, jaxtyped
+from torch import Tensor
 
 
 def _validate_time_grid(t: torch.Tensor) -> None:
@@ -24,12 +24,13 @@ def _validate_time_grid(t: torch.Tensor) -> None:
         raise ValueError("t must contain at least two time points")
 
 
+@jaxtyped(typechecker=beartype)
 def euler_maruyama(
     drift: Callable,
     diffusion: Callable | None,
-    x: torch.Tensor,
-    t: torch.Tensor,
-) -> torch.Tensor:
+    x: Float[Tensor, "*batch D"],
+    t: Float[Tensor, " T"],
+) -> Float[Tensor, "T *batch D"]:
     """Shared Euler-Maruyama loop. No direction validation — callers handle that."""
     trajectory = [x.clone()]
     for t_curr, dt in zip(t[:-1], t[1:] - t[:-1]):
@@ -40,22 +41,23 @@ def euler_maruyama(
     return torch.stack(trajectory)
 
 
+@jaxtyped(typechecker=beartype)
 def forward_sampling(
     drift: Callable,
     diffusion: Callable | None,
-    x: torch.Tensor,
-    t: torch.Tensor,
-) -> torch.Tensor:
+    x: Float[Tensor, "*batch D"],
+    t: Float[Tensor, " T"],
+) -> Float[Tensor, "T *batch D"]:
     """Forward SDE/ODE sampling (t increasing): dx = drift(x,t) dt + diffusion(t) dW.
 
     Args:
         drift: (x, t) -> same shape as x
         diffusion: (t) -> scalar diffusion coefficient; None = ODE (no noise)
-        x: Initial state [*shape, D]
+        x: Initial state [*batch, D]
         t: 1D strictly increasing time grid in [0, 1], >= 2 points
 
     Returns:
-        Trajectory [len(t), *shape, D]
+        Trajectory [T, *batch, D]
     """
     _validate_time_grid(t)
     if not torch.all(t[1:] > t[:-1]):
@@ -63,22 +65,23 @@ def forward_sampling(
     return euler_maruyama(drift, diffusion, x, t)
 
 
+@jaxtyped(typechecker=beartype)
 def reverse_sampling(
     drift: Callable,
     diffusion: Callable | None,
-    x: torch.Tensor,
-    t: torch.Tensor,
-) -> torch.Tensor:
+    x: Float[Tensor, "*batch D"],
+    t: Float[Tensor, " T"],
+) -> Float[Tensor, "T *batch D"]:
     """Reverse SDE/ODE sampling (t decreasing): dx = drift(x,t) dt + diffusion(t) dW.
 
     Args:
         drift: (x, t) -> same shape as x
         diffusion: (t) -> scalar diffusion coefficient; None = ODE (no noise)
-        x: Initial state [*shape, D]
+        x: Initial state [*batch, D]
         t: 1D strictly decreasing time grid in [0, 1], >= 2 points
 
     Returns:
-        Trajectory [len(t), *shape, D]
+        Trajectory [T, *batch, D]
     """
     _validate_time_grid(t)
     if not torch.all(t[1:] < t[:-1]):
@@ -99,14 +102,15 @@ def _systematic_resample(log_w: torch.Tensor) -> torch.Tensor:
     return torch.searchsorted(cdf, u).clamp(max=N - 1)
 
 
+@jaxtyped(typechecker=beartype)
 def steered_reverse_sampling(
     drift: Callable,
     diffusion: Callable | None,
     weight_update: Callable,
-    x: torch.Tensor,
-    t: torch.Tensor,
+    x: Float[Tensor, "N *rest D"],
+    t: Float[Tensor, " T"],
     ess_threshold: float = 0.5,
-) -> tuple[torch.Tensor, list[float]]:
+) -> tuple[Float[Tensor, "T N *rest D"], list[float]]:
     """Reverse SDE/ODE sampling with SMC particle correction via importance resampling.
 
     Args:
@@ -118,7 +122,7 @@ def steered_reverse_sampling(
         ess_threshold:  resample when ESS/N drops below this value
 
     Returns:
-        trajectory:     [len(t), N, *rest, D]
+        trajectory:     [T, N, *rest, D]
         ess_history:    ESS/N at each step, len = len(t) - 1
     """
     _validate_time_grid(t)
@@ -154,7 +158,11 @@ def steered_reverse_sampling(
     return torch.stack(trajectory), ess_history
 
 
-def compute_ess_from_log_weights(log_weight: torch.Tensor, n_particles: int) -> tuple[torch.Tensor, torch.Tensor]:
+@jaxtyped(typechecker=beartype)
+def compute_ess_from_log_weights(
+    log_weight: Float[Tensor, " n_samples"],
+    n_particles: int,
+) -> tuple[Float[Tensor, ""], Float[Tensor, "n_groups n_particles"]]:
     """Compute the effective sample size (ESS) from unnormalized log importance weights.
 
     Splits log_weight into groups of n_particles, normalizes each group via softmax,
@@ -173,8 +181,7 @@ def compute_ess_from_log_weights(log_weight: torch.Tensor, n_particles: int) -> 
     n_samples = log_weight.shape[0]
     assert n_samples % n_particles == 0, "n_samples must be multiple of n_particles"
     n_groups = n_samples // n_particles
-    unnormalized_weight = torch.exp(torch.nn.functional.log_softmax(log_weight.view(n_groups, n_particles), dim=-1))
-    normalized_weight = unnormalized_weight / (unnormalized_weight.sum(dim=-1, keepdim=True) + 1e-12)
+    normalized_weight = torch.softmax(log_weight.view(n_groups, n_particles), dim=-1)
     ess = 1.0 / (normalized_weight**2).sum(dim=-1)
     ess = (ess / n_particles).mean()
     return ess, normalized_weight

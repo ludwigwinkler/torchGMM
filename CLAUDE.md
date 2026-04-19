@@ -24,7 +24,12 @@ pytest -n 8                                                      # Run all tests
 
 **Lint and format:**
 ```bash
-black src tests && isort src tests && flake8 src tests
+ruff check src tests && ruff format src tests
+```
+
+**Type check:**
+```bash
+ty check src
 ```
 
 ## Architecture
@@ -53,6 +58,7 @@ black src tests && isort src tests && flake8 src tests
 - **Shape comments** — annotate tensor shapes with `[*B, K, D]` style notation
 - **Type hints** — use Python 3.10+ syntax (`t: torch.Tensor | None`), required for all public API functions
 - **register_buffer** for non-trainable tensors in `nn.Module` subclasses
-- Black line-length 120, isort black profile, flake8 max-line-length 120, max-complexity 18
-- Custom pytest markers: `@pytest.mark.slow`, `@pytest.mark.integration`
+- Ruff line-length 120, ruff format replaces black/isort, ruff check replaces flake8
+- jaxtyping `Float[Tensor, "*batch D"]` shape annotations on all public methods; `@jaxtyped(typechecker=beartype)` decorator enforces them at runtime
+- Custom pytest markers: `@pytest.mark.slow`
 - Use `@pytest.fixture` for shared setup and `@pytest.mark.parametrize` for variants

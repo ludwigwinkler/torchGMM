@@ -1,4 +1,5 @@
 import einops
+import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -7,11 +8,13 @@ from matplotlib.cm import get_cmap
 
 # --- plotting ---
 from matplotlib.colors import Normalize
+from matplotlib.lines import Line2D
 from torch.distributions import MultivariateNormal
+from tqdm import tqdm
+
 from torchGMM import GMM, Conditional
 from torchGMM.sampling import forward_sampling, reverse_sampling
 from torchGMM.schedule import BetaSchedule, LinearSchedule
-from tqdm import tqdm
 
 torch.manual_seed(100)
 
@@ -160,9 +163,6 @@ plt_show()
 # # All Samplers: Forward + Reverse Trajectories Overlaid
 # Rows: FlowMatching ODE, FlowMatching SDE, BetaSchedule ODE, BetaSchedule SDE
 # Columns: p(x, t≈0) | trajectories (blue=forward 0→1, orange=reverse 1→0) | p(x, t≈1)
-import matplotlib.gridspec as gridspec
-from matplotlib.lines import Line2D
-
 plt.style.use("default")
 plt.rcParams.update(
     {

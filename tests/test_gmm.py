@@ -1,20 +1,9 @@
-import sys
-
-import einops
 import pytest
 import torch
+from conftest import get_local_device
+
 from torchGMM.gmm import GMM, Conditional
 from torchGMM.schedule import BetaSchedule, LinearSchedule
-
-
-def get_local_device():
-    """Fixture that returns the best available device (MPS, CUDA, or CPU)."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
 
 
 @pytest.fixture
@@ -145,7 +134,7 @@ class TestShapes:
         gmm = GMM(mu, sigma, weight)
         x = torch.randn(50, 5, 4, 2)  # [N, B, D], batch_shape=(5, 4)
         t_bad = torch.rand(50, 2)  # wrong trailing dims; need (5, 4) or (50, 5, 4)
-        with pytest.raises(ValueError, match="t must be of shape"):
+        with pytest.raises(ValueError, match="t shape"):
             gmm.log_prob(x, t=t_bad)
 
     @pytest.mark.parametrize(
@@ -175,7 +164,7 @@ class TestShapes:
         gmm = GMM(mu, sigma, weight)
         x = torch.randn(50, 5, 4, 2)  # [N, B, D], batch_shape=(5, 4)
         t_bad = torch.rand(5, 2)  # wrong trailing dims; need (5, 4) or (50, 5, 4)
-        with pytest.raises(ValueError, match="t must be of shape"):
+        with pytest.raises(ValueError, match="t shape"):
             gmm.score(x, t=t_bad)
 
     def test_invalid_t_shape_raises_for_sample(self):
@@ -185,7 +174,7 @@ class TestShapes:
         weight = torch.ones(5, 4, 3)
         gmm = GMM(mu, sigma, weight)
         t_bad = torch.rand(5, 2)  # wrong batch dims; need (5, 4)
-        with pytest.raises(ValueError, match="t must be of shape"):
+        with pytest.raises(ValueError, match="t shape"):
             gmm.sample(shape=None, t=t_bad)
 
     def test_single_batch_dim_dropping(self):
@@ -211,9 +200,10 @@ class TestDistribution:
 
     @pytest.mark.parametrize("t", [0.0, 0.5, 0.9, 1.0])
     def test_conditional_vs_gmm(self, t):
-        """Test distribution properties for different times
-        We initialize a conditional process with only mu=x0 and a GMM with mu, sigma, and weight imitating a conditional model.
-        Then we compare the statistics of the sampled forward process at different times t.
+        """Test distribution properties for different times.
+
+        Initialize a conditional process with only mu=x0 and a GMM with mu, sigma, and weight
+        imitating a conditional model. Compare forward-process statistics at different times t.
         """
         mu = torch.randn(4, 1, 2)
         sigma = torch.zeros(4, 1, 2) + 1e-10
@@ -237,9 +227,7 @@ class TestDistribution:
 
     @pytest.mark.parametrize("t", [0.0, 0.5, 0.9, 1.0])
     def test_conditional_vs_gmm_score(self, t):
-        """Test distribution properties for different times
-        We initialize a conditional process with only mu=x0 and a GMM with mu, sigma, and weight imitating a conditional model.
-        Then we compare the statistics of the sampled forward process at different times t.
+        """Test score agreement between Conditional and equivalent GMM at different times.
 
         Note: This test focuses on scalar time values to keep the logic simple.
         Each batch GMM is independent, so we evaluate samples from each batch separately.
@@ -320,8 +308,10 @@ class TestGMMProperties:
 class Test2DMarginalizedDistributions:
     """Test marginal distribution extraction from GMM"""
 
+    @pytest.mark.slow
     def test_marginal_2d_empirical_comparison(self):
         """Compare empirical histograms with analytical marginal distributions"""
+        torch.manual_seed(0)
         # Create 3-component 2D GMM
         mu = torch.tensor([[2.0, -2.0], [-2.0, 3.0], [0.0, 0.0]]).unsqueeze(0)  # [1, 3, 2]
         sigma = torch.tensor([[0.5, 0.4], [0.5, 0.5], [0.3, 0.4]]).unsqueeze(0)  # [1, 3, 2]
@@ -337,7 +327,6 @@ class Test2DMarginalizedDistributions:
         n_bins = 100
         bin_edges = torch.linspace(x_min, x_max, n_bins + 1)  # [n_bins+1]
         bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])  # [n_bins]
-        bin_width = (x_max - x_min) / n_bins
 
         # Test dimension 0
         empirical_0 = samples[:, :, 0]  # [n_samples, BS=1]
@@ -386,13 +375,13 @@ class TestTemperatureSampling:
             log_prob = gmm.log_prob(mesh_points, t=0.0)
             tempered_log_prob = temperature * log_prob
             temperature_log_prob = temperature_gmm.log_prob(mesh_points, t=0.0)
-            prob = torch.exp(log_prob) / torch.exp(log_prob).sum()
             tempered_prob = torch.exp(tempered_log_prob) / torch.exp(tempered_log_prob).sum()
             temperature_prob = torch.exp(temperature_log_prob) / torch.exp(temperature_log_prob).sum()
             torch.testing.assert_close(
                 temperature_prob, tempered_prob, atol=0.01, rtol=0.1, msg=f"Temperature: {temperature}"
             )
 
+    @pytest.mark.slow
     def test_temperature_importance_sampling(self):
         """
         Test importance sampling from a tempered GMM.
@@ -420,16 +409,12 @@ class TestTemperatureSampling:
             resampled = samples[idx, 0, 0]  # [N]
 
             # Compare histogram of resampled to tempered GMM density
-            x_grid = torch.linspace(-3.0, 3.0, 100).reshape(-1, 1, 1)
             bin_edges = torch.linspace(-3.0, 3.0, 51)
             hist, _ = torch.histogram(resampled, bins=bin_edges, density=True)
-            target = temperature_gmm.log_prob(x_grid, t=0.0).exp().squeeze()
             # Evaluate target at bin centres
             bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:]).reshape(-1, 1, 1)
             target_bins = temperature_gmm.log_prob(bin_centers, t=0.0).exp().squeeze()
-            assert (
-                hist - target_bins
-            ).abs().max() < 0.05, (
+            assert (hist - target_bins).abs().max() < 0.05, (
                 f"IS resample @ temp={temperature}: max deviation {(hist - target_bins).abs().max():.3f}"
             )
 
@@ -568,7 +553,7 @@ class TestDeviceHandling:
         """
         Create GMM on the specified device, evaluate log_prob and score.
         """
-        gmm, expected_mean, expected_std = simple_gmm_2d
+        gmm, _, _ = simple_gmm_2d
 
         # Move GMM to the desired device
         gmm = gmm.to(local_device)

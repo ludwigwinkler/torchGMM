@@ -1,10 +1,11 @@
 import matplotlib.pyplot as plt
 import torch
 from _utils import plt_show
+from tqdm import tqdm
+
 from torchGMM import GMM
 from torchGMM.sampling import steered_reverse_sampling
 from torchGMM.schedule import BetaSchedule
-from tqdm import tqdm
 
 torch.manual_seed(0)
 device = torch.device("cpu")

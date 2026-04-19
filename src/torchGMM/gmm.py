@@ -1,9 +1,3 @@
-import einops
-import torch
-from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal, Normal
-
-from torchGMM.schedule import BetaSchedule, LinearSchedule, Schedule
-
 """
 GMM: Gaussian Mixture Model with time-dependent diffusion schedule.
 Params [*B, K, D]. Two shapes only:
@@ -12,8 +6,47 @@ Params [*B, K, D]. Two shapes only:
 - Outputs: log_prob/energy -> [*N, *B], score -> [*N, *B, D], sample(shape, t) -> [*N, *B, D].
 """
 
+import torch
+from beartype import beartype
+from jaxtyping import Float, jaxtyped
+from torch import Tensor
+from torch.distributions import Categorical, MixtureSameFamily, MultivariateNormal
+
+from torchGMM.schedule import BetaSchedule, LinearSchedule, Schedule
+
+
+def validate_positive_tensor(name: str, tensor: torch.Tensor) -> None:
+    if not torch.all(torch.isfinite(tensor)):
+        raise ValueError(f"{name} must be finite")
+    if not torch.all(tensor > 0):
+        raise ValueError(f"{name} must be > 0")
+
+
+def validate_time_range(t: int | float | torch.Tensor) -> None:
+    if isinstance(t, torch.Tensor):
+        # tensor path: check element-wise so the full batch is validated at once
+        if not torch.all(torch.isfinite(t)):
+            raise ValueError("t must be finite")
+        if not torch.all((t >= 0) & (t <= 1)):
+            raise ValueError("t must be within [0, 1]")
+    else:
+        # scalar path: plain Python comparison suffices
+        if not (0 <= t <= 1):
+            raise ValueError("t must be within [0, 1]")
+
 
 class GMM(torch.nn.Module):
+    # register_buffer stores tensors in nn.Module._buffers; these annotations expose them to type checkers.
+    mu: torch.Tensor
+    sigma: torch.Tensor
+    weight: torch.Tensor
+    batch_shape: torch.Size
+    batch_ndim: int
+    num_components: int
+    dim: int
+    event_shape: tuple[int, ...]
+    schedule: Schedule
+
     def __init__(
         self,
         mu: torch.Tensor,
@@ -35,15 +68,14 @@ class GMM(torch.nn.Module):
         mu = torch.as_tensor(mu)
         assert mu.dim() >= 2, f"mu must be at least 2D [*, k, d], got {mu.shape}"
         sigma = (
-            torch.zeros_like(mu) + 1e-10 if sigma is None else torch.as_tensor(sigma)
-        )  # no sigma → near-zero (point mass)
+            torch.zeros_like(mu) + 1e-4 if sigma is None else torch.as_tensor(sigma)
+        )  # default floor sits safely above float32 precision
         weight = (
             mu.new_ones((*mu.shape[:-2], 1)) if weight is None else torch.as_tensor(weight)
         )  # no weight → single uniform component
 
-        assert mu.shape[:-1] == sigma.shape[:-1] == weight.shape, (
-            f"mu/sigma/weight leading shapes must match: mu {mu.shape}, sigma {sigma.shape}, weight {weight.shape}"
-        )
+        assert sigma.shape == mu.shape, f"sigma must match mu shape, got {sigma.shape} vs {mu.shape}"
+        assert weight.shape == mu.shape[:-1], f"weight must be [..., k], got {weight.shape}"
 
         # mu is [K, D]: no explicit batch dim provided → wrap into a single-element batch [1, K, D]
         if mu.dim() == 2:
@@ -51,21 +83,12 @@ class GMM(torch.nn.Module):
             sigma = sigma.unsqueeze(0)
             weight = weight.unsqueeze(0)
 
-        assert sigma.shape == mu.shape, f"sigma must match mu shape, got {sigma.shape} vs {mu.shape}"
-        assert weight.shape == mu.shape[:-1], f"weight must be [..., k], got {weight.shape}"
-        assert mu.shape[-2] == weight.shape[-1], (
-            f"Number of components must match: mu {mu.shape[-2]}, weight {weight.shape[-1]}"
-        )
-
-        self._validate_positive_tensor("sigma", sigma)
-        self._validate_positive_tensor("weight", weight)
+        validate_positive_tensor("sigma", sigma)
+        validate_positive_tensor("weight", weight)
         weight_sum = weight.sum(dim=-1, keepdim=True)
         if not torch.all(weight_sum > 0):
             raise ValueError("weight sum must be > 0 for all batches")
         weight = weight / weight_sum
-        self.mu: torch.Tensor
-        self.sigma: torch.Tensor
-        self.weight: torch.Tensor
         self.register_buffer("mu", mu)
         self.register_buffer("sigma", sigma)
         self.register_buffer("weight", weight)
@@ -79,7 +102,6 @@ class GMM(torch.nn.Module):
         assert self.batch_ndim >= 1, "Batch dimension must be at least 1"
 
         # Shape metadata following PyTorch distribution conventions
-        self.batch_shape = self.batch_shape
         self.event_shape = (self.dim,)  # [Dim]
 
         self.schedule = BetaSchedule(beta_min=0.1, beta_max=20.0) if schedule is None else schedule
@@ -92,47 +114,26 @@ class GMM(torch.nn.Module):
         elif not isinstance(t, torch.Tensor):
             # Python scalar (int/float) → broadcast to full [*sample_shape, *batch_shape]
             t_value = float(t)
-            self._validate_time_range(t_value)
+            validate_time_range(t_value)
             return torch.ones(*(sample_shape + self.batch_shape), device=self.mu.device, dtype=self.mu.dtype) * t_value
         elif t.dim() == 0:
             # 0-dim tensor (e.g. torch.tensor(0.5)) → same as scalar, broadcast to full shape
             t_value = t.item()
-            self._validate_time_range(t_value)
+            validate_time_range(t_value)
             return torch.ones(*(sample_shape + self.batch_shape), device=t.device, dtype=t.dtype) * t_value
         elif t.shape == sample_shape + self.batch_shape:
             # t already has the full [*sample_shape, *batch_shape] shape → use as-is
-            self._validate_time_range(t)
+            validate_time_range(t)
             return t
         elif t.shape == self.batch_shape:
             # t has only batch shape (one t per GMM in the batch) → expand over sample dims
-            self._validate_time_range(t)
+            validate_time_range(t)
             if len(sample_shape) == 0:
                 # no sample dims requested → batch shape is the full shape already
                 return t
             return t.expand(sample_shape + self.batch_shape)
-        raise ValueError(
-            f"t must be of shape {t.shape if isinstance(t, torch.Tensor) else t} must be {sample_shape+self.batch_shape=}, got {t.shape if isinstance(t, torch.Tensor) else t}"
-        )
-
-    @staticmethod
-    def _validate_positive_tensor(name: str, tensor: torch.Tensor) -> None:
-        if not torch.all(torch.isfinite(tensor)):
-            raise ValueError(f"{name} must be finite")
-        if not torch.all(tensor > 0):
-            raise ValueError(f"{name} must be > 0")
-
-    @staticmethod
-    def _validate_time_range(t: int | float | torch.Tensor) -> None:
-        if isinstance(t, torch.Tensor):
-            # tensor path: check element-wise so the full batch is validated at once
-            if not torch.all(torch.isfinite(t)):
-                raise ValueError("t must be finite")
-            if not torch.all((t >= 0) & (t <= 1)):
-                raise ValueError("t must be within [0, 1]")
-        else:
-            # scalar path: plain Python comparison suffices
-            if not (0 <= t <= 1):
-                raise ValueError("t must be within [0, 1]")
+        t_repr = t.shape if isinstance(t, torch.Tensor) else t
+        raise ValueError(f"t shape {t_repr!r} incompatible with expected {sample_shape + self.batch_shape}")
 
     def _gmm_t(self, t: torch.Tensor) -> MixtureSameFamily:
         """Marginal GMM at time t. t: [*N, *B]. Returns MixtureSameFamily with batch_shape=t.shape, event_shape=(D,)."""
@@ -203,7 +204,10 @@ class GMM(torch.nn.Module):
 
         return GMM(mu_new, sigma_new, weight_new, self.schedule)
 
-    def log_prob(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
+    @jaxtyped(typechecker=beartype)
+    def log_prob(
+        self, x: Float[Tensor, "*batch D"], t: int | float | torch.Tensor | None = None
+    ) -> Float[Tensor, "*batch"]:
         """log_prob(x, t) -> [*N, *B]. x: [*N, *B, D], t: scalar or shape x.shape[:-1], with t in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
         assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
@@ -214,40 +218,22 @@ class GMM(torch.nn.Module):
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
         return self._gmm_t(t_exp).log_prob(x)
 
-    def __call__(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
-        """Alias for log_prob(x, t)."""
+    def forward(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
+        """Alias for log_prob(x, t). Dispatching via nn.Module.__call__ preserves forward-hook semantics."""
         return self.log_prob(x, t)
 
-    def energy(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
+    @jaxtyped(typechecker=beartype)
+    def energy(
+        self, x: Float[Tensor, "*batch D"], t: int | float | torch.Tensor | None = None
+    ) -> Float[Tensor, "*batch"]:
         """energy(x, t) -> [*N, *B]. Returns -log_prob(x, t). t: scalar or shape x.shape[:-1] in [0, 1]."""
         return -self.log_prob(x, t)
 
-    def cdf(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
-        raise NotImplementedError("CDF not implemented for time dependent GMMs")
-        """cdf(x, t) -> [*N, *B]. Only 1D (D=1). x: [*N, *B, 1], t: [*B] or [*N, *B] (or scalar)."""
-        assert x.shape[-1] == self.dim == 1, f"CDF only supports 1D, got x.shape={x.shape}, self.dim={self.dim}"
-        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
-            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
-        )
-        sample_shape = x.shape[: -(self.batch_ndim + 1)]
-        t_exp = self._expand_t(t, sample_shape)
-        x_flat = x.reshape(-1, *self.batch_shape, 1)
-        t_flat = t_exp.reshape(-1, *self.batch_shape)
-        alpha_t, sigma_t = self.schedule.get_alpha_t_sigma_t(t_flat)
-        mu_t = einops.einsum(alpha_t, self.mu, "n ... , ... k d -> n ... k d")
-        increasing_var_t = einops.einsum(
-            sigma_t**2, self.mu.new_ones(self.num_components, 1), "n ... , k d -> n ... k d"
-        )
-        decreasing_var_t = einops.einsum(alpha_t, self.sigma, "n ... , ... k d -> n ... k d") ** 2
-        std_t = torch.sqrt(increasing_var_t + decreasing_var_t)
-        x_expanded = einops.repeat(x_flat, "n ... d -> n ... k d", k=self.num_components)
-        component_cdf = Normal(mu_t.squeeze(-1), std_t.squeeze(-1)).cdf(x_expanded.squeeze(-1))
-        batched_probs = einops.repeat(self.weight, "... k -> n ... k", n=t_flat.shape[0])
-        mix_cdf_flat = einops.einsum(component_cdf, batched_probs, "n ... k, n ... k -> n ...")
-        return mix_cdf_flat.reshape(*sample_shape, *self.batch_shape)
-
+    @jaxtyped(typechecker=beartype)
     @torch.enable_grad()
-    def score(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
+    def score(
+        self, x: Float[Tensor, "*batch D"], t: int | float | torch.Tensor | None = None
+    ) -> Float[Tensor, "*batch D"]:
         """score(x, t) -> [*N, *B, D]. ∇_x log p(x). x: [*N, *B, D], t: scalar or shape x.shape[:-1] in [0, 1]."""
         assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
         assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
@@ -260,7 +246,10 @@ class GMM(torch.nn.Module):
         score = torch.autograd.grad(self._gmm_t(t_exp).log_prob(x_grad).sum(), x_grad, create_graph=False)[0].detach()
         return score
 
-    def velocity(self, x: torch.Tensor, t: int | float | torch.Tensor | None = None) -> torch.Tensor:
+    @jaxtyped(typechecker=beartype)
+    def velocity(
+        self, x: Float[Tensor, "*batch D"], t: int | float | torch.Tensor | None = None
+    ) -> Float[Tensor, "*batch D"]:
         """velocity(x, t) -> [*N, *B, D]. Marginal velocity field.
 
         Derived from v_t(x) = (dα/dt) E[x_0|x_t=x] + (dσ/dt) E[ε|x_t=x]
@@ -274,7 +263,7 @@ class GMM(torch.nn.Module):
         t_exp = self._expand_t(t, sample_shape)  # [*N, *B]
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
 
-        alpha_t = self.schedule.get_alpha_t(t_exp)  # [*N, *B]
+        alpha_t = self.schedule.get_alpha_t(t_exp).clamp_min(1e-6)  # [*N, *B]; avoid 1/α→∞ at t=1 (LinearSchedule)
         sigma_t = self.schedule.get_sigma_t(t_exp)  # [*N, *B]
         dalpha_dt = self.schedule.get_dalpha_dt(t_exp)  # [*N, *B]
         dsigma_dt = self.schedule.get_dsigma_dt(t_exp)  # [*N, *B]
@@ -288,7 +277,11 @@ class GMM(torch.nn.Module):
         return coeff_x * x + coeff_score * score
 
     def sample(self, shape: tuple | int | None = None, t: float | torch.Tensor | None = None) -> torch.Tensor:
-        """sample(shape, t) -> [*N, *B, D]. shape: full [*N,*B] (tuple must end with batch_shape), or int (N single dim), or None -> [*B,D]. t: scalar or shape [*N,*B] in [0, 1]."""
+        """sample(shape, t) -> [*N, *B, D].
+
+        shape: full [*N,*B] tuple ending with batch_shape, int N, or None -> [*B, D].
+        t: scalar or [*N, *B] in [0, 1].
+        """
         if shape is None:
             # no shape → one sample per GMM in the batch, output is [*batch_shape, D]
             sample_shape = ()
@@ -323,13 +316,10 @@ class Conditional(GMM):
         x0 = torch.as_tensor(x0)
         assert x0.dim() >= 1, "x0 must be at least 1D [*B, D]"
         mu = x0.unsqueeze(-2)  # [*B, 1, D]
-        sigma = torch.ones_like(mu) * 1e-10  # near-zero for delta approximation
+        sigma = torch.ones_like(mu) * 1e-4  # small but above float32 precision floor
         weight = x0.new_ones(*x0.shape[:-1], 1)  # [*B, 1]
         super().__init__(mu, sigma, weight, schedule)
 
     def __repr__(self):
-        return f"Conditional(x0={self.mu.squeeze(-2).shape}, batch_shape={self.batch_shape}, schedule={type(self.schedule).__name__})"
-
-
-# Backward compatibility alias
-TimeDependentGMM = GMM
+        sched = type(self.schedule).__name__
+        return f"Conditional(x0={self.mu.squeeze(-2).shape}, batch_shape={self.batch_shape}, schedule={sched})"

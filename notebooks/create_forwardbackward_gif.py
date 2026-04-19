@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.stats import norm
+
 from torchGMM import GMM, BetaSchedule, forward_sampling, reverse_sampling
 
 plt.style.use("default")
