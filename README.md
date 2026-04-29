@@ -1,6 +1,6 @@
 # torchGMM
 
-Analytical diffusion on Gaussian Mixture Models in PyTorch.
+Analytical diffusion on Gaussian Mixture Models in PyTorch when you have a diffusion idea and want a diffusion sandbox to test out stuff.
 
 <p align="center">
   <img src="notebooks/forward_backward_diffusion.gif" alt="Forward and reverse diffusion on a 1-D GMM" width="800">
