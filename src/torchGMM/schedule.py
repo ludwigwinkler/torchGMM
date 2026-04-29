@@ -170,3 +170,115 @@ class LinearSchedule(Schedule):
         """g(t) = √(2t / (1 − t))"""
         t = self._clamp_t(t)
         return torch.sqrt(2 * t / (1 - t))
+
+
+class VESchedule(Schedule):
+    """Variance Exploding schedule (Song et al., SMLD / NCSN).
+
+    Geometric noise scale: σ_t = σ_min · (σ_max / σ_min)^t, with α_t ≡ 1.
+
+    Forward SDE has zero drift and diffusion g(t) = σ_t · √(2 ln(σ_max/σ_min)).
+    Not variance-preserving: marginal variance grows from σ_min² to σ_max².
+    """
+
+    def __init__(self, sigma_min: float = 0.01, sigma_max: float = 50.0):
+        super().__init__()
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.log_ratio = torch.log(torch.tensor(sigma_max / sigma_min))
+
+    @jaxtyped(typechecker=beartype)
+    def get_alpha_t(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """α_t = 1"""
+        return torch.ones_like(t)
+
+    @jaxtyped(typechecker=beartype)
+    def get_sigma_t(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """σ_t = σ_min · (σ_max / σ_min)^t"""
+        return self.sigma_min * torch.exp(t * self.log_ratio)
+
+    @jaxtyped(typechecker=beartype)
+    def get_dalpha_dt(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """dα_t/dt = 0"""
+        return torch.zeros_like(t)
+
+    @jaxtyped(typechecker=beartype)
+    def get_dsigma_dt(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """dσ_t/dt = σ_t · ln(σ_max/σ_min)"""
+        return self.get_sigma_t(t) * self.log_ratio
+
+    @jaxtyped(typechecker=beartype)
+    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
+        """f(x,t) = 0 — VE has no drift."""
+        return torch.zeros_like(x)
+
+    @jaxtyped(typechecker=beartype)
+    def diffusion_coeff(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """g(t) = σ_t · √(2 ln(σ_max/σ_min))"""
+        return self.get_sigma_t(t) * torch.sqrt(2 * self.log_ratio)
+
+
+class KarrasSchedule(Schedule):
+    """Karras et al. (2022) / AlphaFold3-style VE schedule.
+
+    Continuous form of the discrete EDM noise grid:
+        σ(t) = (σ_min^{1/ρ} + t · (σ_max^{1/ρ} − σ_min^{1/ρ}))^ρ
+
+    with α_t ≡ 1 and t ∈ [0, 1]. ρ controls step concentration: ρ=7 (the AF3 /
+    EDM default) packs more low-noise steps near t=0, which is helpful for
+    high-fidelity sampling. ρ=1 recovers a linear σ schedule.
+
+    AF3 sets σ_data ≈ 16 Å, σ_max ≈ 160, σ_min ≈ 4e−4, ρ=7. σ_data is a
+    preconditioning constant for the denoiser; here we expose it as a multiplier
+    on the σ range so the schedule itself remains a pure noise schedule.
+    """
+
+    def __init__(
+        self,
+        sigma_min: float = 4e-4,
+        sigma_max: float = 160.0,
+        rho: float = 7.0,
+        sigma_data: float = 1.0,
+    ):
+        super().__init__()
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.rho = rho
+        self.sigma_data = sigma_data
+        # cache the t=0/t=1 inverse-ρ endpoints
+        self._u_min = sigma_min ** (1.0 / rho)
+        self._u_max = sigma_max ** (1.0 / rho)
+
+    @jaxtyped(typechecker=beartype)
+    def get_alpha_t(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """α_t = 1"""
+        return torch.ones_like(t)
+
+    @jaxtyped(typechecker=beartype)
+    def get_sigma_t(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """σ(t) = σ_data · (σ_min^{1/ρ} + t · (σ_max^{1/ρ} − σ_min^{1/ρ}))^ρ"""
+        u = self._u_min + t * (self._u_max - self._u_min)
+        return self.sigma_data * u**self.rho
+
+    @jaxtyped(typechecker=beartype)
+    def get_dalpha_dt(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """dα_t/dt = 0"""
+        return torch.zeros_like(t)
+
+    @jaxtyped(typechecker=beartype)
+    def get_dsigma_dt(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """dσ/dt = σ_data · ρ · u(t)^{ρ−1} · (σ_max^{1/ρ} − σ_min^{1/ρ})"""
+        u = self._u_min + t * (self._u_max - self._u_min)
+        return self.sigma_data * self.rho * u ** (self.rho - 1) * (self._u_max - self._u_min)
+
+    @jaxtyped(typechecker=beartype)
+    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
+        """f(x,t) = 0 — pure VE process."""
+        return torch.zeros_like(x)
+
+    @jaxtyped(typechecker=beartype)
+    def diffusion_coeff(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """g(t) = √(2 σ_t σ̇_t)"""
+        sigma_t = self.get_sigma_t(t)
+        dsigma_dt = self.get_dsigma_dt(t)
+        return torch.sqrt(2 * sigma_t * dsigma_dt)
