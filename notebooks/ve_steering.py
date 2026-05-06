@@ -1,3 +1,4 @@
+# %%
 """Forward process visualization for the Karras VE schedule.
 
 Top row: B=4 single-component GMMs overlaid in a single trajectory panel with
@@ -20,6 +21,9 @@ plt.rcdefaults()
 torch.manual_seed(0)
 device = torch.device("cpu")
 torch.set_default_device(device)
+
+# %% [markdown]
+# # Variance Exploding Forward Process
 
 # --- model: B=4 separate GMMs, each with K=1 component ---
 schedule = KarrasSchedule()
@@ -100,7 +104,7 @@ for s in range(n_seg):
     seg = traj[mask, :, :, 0]
 
     for b in range(B):
-        ax.plot(ts, seg[:, :, b], color=colors[b], alpha=0.05, lw=0.5)
+        ax.plot(ts, seg[:, :, b], color=colors[b], alpha=0.01, lw=0.5)
         if s == 0:
             ax.plot([], [], color=colors[b], lw=2, label=rf"$\mu={float(mu[b, 0, 0]):.1f}$")
 
@@ -117,7 +121,10 @@ for s in range(n_seg):
 
 plt_show()
 
+# %% [markdown]
+# # Variance Exploding FKC Steering
 
+# %%
 # ============================================================================
 # FKC-steered reverse sampling on a B=1, K=4 mixture
 # A Gaussian potential is placed on a single target mode; we compare the
@@ -134,7 +141,7 @@ gmm_mix = GMM(mu=mu_mix, sigma=sigma_mix, weight=weight_mix, schedule=ve_sched)
 
 TARGET_K = 3  # mode at μ = +4.0
 target_c = 3
-target_s = 0.6  # potential width
+target_s = 1.0  # potential width
 
 
 def r(x):
