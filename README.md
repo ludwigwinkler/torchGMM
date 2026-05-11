@@ -66,7 +66,8 @@ mu     = torch.tensor([[-2.0, 0.0],
 sigma  = torch.ones(1, 2, 2) * 0.5                    # [1, K=2, D=2]
 weight = torch.tensor([[0.3, 0.7]])                    # [1, K=2]
 
-gmm = GMM(mu, sigma, weight)
+schedule = BetaSchedule(beta_min=0.1, beta_max=20.0)
+gmm = GMM(mu, sigma, weight, schedule=schedule)
 
 # Exact log-probability at noise level t = 0.4
 x = torch.randn(1000, 1, 2)          # [N, *B, D]
@@ -81,30 +82,44 @@ samples = gmm.sample(5000)           # [N, *B, D]
 
 ### Running the Forward & Reverse SDE
 
+`forward_sampling` / `reverse_sampling` accept `drift` and `diffusion` callables, so
+the schedule and the GMM score combine explicitly into the reverse SDE drift:
+
+$$dX_t = \bigl[f(t)\,X_t - g(t)^2\,\nabla_x \log p_t(x)\bigr]\,dt + g(t)\,dW_t.$$
+
 ```python
-from torchGMM import forward_diffusion, reverse_diffusion
+from torchGMM import forward_sampling, reverse_sampling
 
-schedule = BetaSchedule(beta_min=0.1, beta_max=20.0)
-t_fwd = torch.linspace(0, 1, 500)
-t_rev = torch.linspace(1, 0, 500)
+eps = 1e-3
+t_fwd = torch.linspace(eps, 1.0 - eps, 500)
+t_rev = torch.linspace(1.0 - eps, eps, 500)
 
-# Forward: data → noise
-x0 = gmm.sample(512)
-traj_fwd = forward_diffusion(schedule, x0, t_fwd)
+# Forward: data → noise (drift and diffusion come straight from the schedule)
+x0 = gmm.sample(512)                                                  # [512, 1, 2]
+traj_fwd = forward_sampling(
+    schedule.forward_drift, schedule.diffusion_coeff, x0, t_fwd,
+)                                                                     # [T, 512, 1, 2]
 
-# Reverse: noise → data (using the exact score)
+# Reverse: noise → data using the exact GMM score
+reverse_drift = lambda x, t: (
+    schedule.forward_drift(x, t) - schedule.diffusion_coeff(t) ** 2 * gmm.score(x, t)
+)
 x_noise = torch.randn_like(x0)
-traj_rev = reverse_diffusion(schedule, gmm.score, x_noise, t_rev)
+traj_rev = reverse_sampling(
+    reverse_drift, schedule.diffusion_coeff, x_noise, t_rev,
+).detach()                                                            # [T, 512, 1, 2]
 ```
+
+Pass `diffusion=None` to either sampler for the deterministic probability-flow ODE.
 
 ### Conditional Process
 
 ```python
-from torchGMM import GMM
+from torchGMM import Conditional
 
 # Conditional on a single starting point x0
-x0 = torch.tensor([[1.0, -1.0]])          # [1, D=2]
-cond = GMM.Conditional(x0)   # single-component GMM at x0
+x0 = torch.tensor([[1.0, -1.0]])          # [B=1, D=2]
+cond = Conditional(x0, schedule=schedule) # single-component GMM at x0
 
 # Score of the conditional forward process
 s = cond.score(x, t=0.6)

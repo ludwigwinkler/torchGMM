@@ -210,10 +210,10 @@ Thumbs.db
 specs/**
 .github/agents
 .github/prompts
-.cursorignore
-.cursorindexingignore
+*.pdf
 
 # Marimo
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+

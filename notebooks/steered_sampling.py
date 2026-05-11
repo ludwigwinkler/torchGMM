@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from torchGMM import GMM
 from torchGMM.sampling import steered_reverse_sampling
-from torchGMM.schedule import BetaSchedule
+from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 torch.manual_seed(0)
 device = torch.device("cpu")
@@ -13,7 +13,7 @@ print(f"Using device: {device}")
 torch.set_default_device(device)
 
 # --- model ---
-sched = BetaSchedule()
+sched = LinearSchedule()
 gmm = GMM(
     mu=torch.tensor([[[-2.5], [2.5]]]),
     sigma=torch.tensor([[[0.8], [0.8]]]),
