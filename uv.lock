@@ -2216,20 +2216,23 @@ dependencies = [
     { name = "einops" },
     { name = "jaxtyping", version = "0.3.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "jaxtyping", version = "0.3.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-sugar" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "torch" },
     { name = "tqdm" },
+    { name = "ty" },
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "pre-commit" },
-    { name = "ruff" },
-    { name = "ty" },
-]
 jupyter = [
     { name = "ipykernel" },
     { name = "ipython", version = "8.37.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -2241,13 +2244,6 @@ jupyter = [
     { name = "pillow" },
     { name = "rich" },
 ]
-test = [
-    { name = "matplotlib" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-sugar" },
-    { name = "pytest-xdist" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -2258,24 +2254,24 @@ requires-dist = [
     { name = "jaxtyping", specifier = ">=0.2.34" },
     { name = "jupyter-client", marker = "extra == 'jupyter'", specifier = ">=8.6.3" },
     { name = "jupyter-core", marker = "extra == 'jupyter'", specifier = ">=5.7.2" },
+    { name = "matplotlib" },
     { name = "matplotlib", marker = "extra == 'jupyter'" },
-    { name = "matplotlib", marker = "extra == 'test'" },
     { name = "matplotlib-inline", marker = "extra == 'jupyter'", specifier = ">=0.1.7" },
     { name = "numpy" },
     { name = "pillow", marker = "extra == 'jupyter'" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.1" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.4.1" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0.0" },
-    { name = "pytest-sugar", marker = "extra == 'test'", specifier = ">=1.0.0" },
-    { name = "pytest-xdist", marker = "extra == 'test'", specifier = ">=3.8.0" },
+    { name = "pre-commit", specifier = ">=4.0.1" },
+    { name = "pytest", specifier = ">=8.4.1" },
+    { name = "pytest-cov", specifier = ">=5.0.0" },
+    { name = "pytest-sugar", specifier = ">=1.0.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "rich", marker = "extra == 'jupyter'", specifier = ">=13.13.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.0" },
+    { name = "ruff", specifier = ">=0.9.0" },
     { name = "scipy", specifier = ">=1.15.3" },
     { name = "torch", specifier = ">=2.7.1" },
     { name = "tqdm", specifier = ">=4.67.1" },
-    { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.1a8" },
+    { name = "ty", specifier = ">=0.0.1a8" },
 ]
-provides-extras = ["test", "dev", "jupyter"]
+provides-extras = ["jupyter"]
 
 [[package]]
 name = "tornado"
