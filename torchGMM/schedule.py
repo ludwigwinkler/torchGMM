@@ -42,7 +42,9 @@ class Schedule(torch.nn.Module):
         raise NotImplementedError
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
+    def forward_drift(
+        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
+    ) -> Float[Tensor, "*batch D"]:
         """Forward SDE drift f(x,t) = (α̇_t / α_t) x. t broadcasts over x's batch dims."""
         t = self._clamp_t(t)
         return (self.get_dalpha_dt(t) / self.get_alpha_t(t)).unsqueeze(-1) * x
@@ -120,7 +122,9 @@ class BetaSchedule(Schedule):
         return self.get_alpha_t(t), self.get_sigma_t(t)
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
+    def forward_drift(
+        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
+    ) -> Float[Tensor, "*batch D"]:
         """f(x,t) = -½ β(t) x. t broadcasts over x's batch dims."""
         return -0.5 * self.beta(t).unsqueeze(-1) * x
 
@@ -160,7 +164,9 @@ class LinearSchedule(Schedule):
         return torch.ones_like(t)
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
+    def forward_drift(
+        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
+    ) -> Float[Tensor, "*batch D"]:
         """f(x,t) = -x / (1 − t). t broadcasts over x's batch dims."""
         t = self._clamp_t(t)
         return -x / (1 - t).unsqueeze(-1)
@@ -208,7 +214,9 @@ class VESchedule(Schedule):
         return self.get_sigma_t(t) * self.log_ratio
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
+    def forward_drift(
+        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
+    ) -> Float[Tensor, "*batch D"]:
         """f(x,t) = 0 — VE has no drift."""
         return torch.zeros_like(x)
 
@@ -269,10 +277,17 @@ class KarrasSchedule(Schedule):
     def get_dsigma_dt(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
         """dσ/dt = σ_data · ρ · u(t)^{ρ−1} · (σ_max^{1/ρ} − σ_min^{1/ρ})"""
         u = self._u_min + t * (self._u_max - self._u_min)
-        return self.sigma_data * self.rho * u ** (self.rho - 1) * (self._u_max - self._u_min)
+        return (
+            self.sigma_data
+            * self.rho
+            * u ** (self.rho - 1)
+            * (self._u_max - self._u_min)
+        )
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
+    def forward_drift(
+        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
+    ) -> Float[Tensor, "*batch D"]:
         """f(x,t) = 0 — pure VE process."""
         return torch.zeros_like(x)
 

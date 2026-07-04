@@ -1,4 +1,4 @@
-# CLAUDE.md — src/torchGMM
+# CLAUDE.md — torchGMM
 
 Package-level guidance for working inside this directory.
 
@@ -8,7 +8,7 @@ Package-level guidance for working inside this directory.
 |---|---|
 | `__init__.py` | Public re-exports only — no logic |
 | `gmm.py` | `GMM` and `Conditional` classes |
-| `schedule.py` | `Schedule`, `BetaSchedule`, `LinearSchedule` |
+| `schedule.py` | `Schedule`, `BetaSchedule`, `LinearSchedule`, `VESchedule`, `KarrasSchedule` |
 | `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `steered_reverse_sampling` |
 
 ## Shape convention

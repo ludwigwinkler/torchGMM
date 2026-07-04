@@ -15,21 +15,17 @@
         "scipy>=1.15.3",
         "torch>=2.7.1",
         "tqdm>=4.67.1",
-    ]
-
-[project.optional-dependencies]
-    test = [
         "matplotlib",
         "pytest>=8.4.1",
         "pytest-cov>=5.0.0",
         "pytest-sugar>=1.0.0",
         "pytest-xdist>=3.8.0",
-    ]
-    dev = [
         "pre-commit>=4.0.1",
         "ruff>=0.9.0",
         "ty>=0.0.1a8",
     ]
+
+[project.optional-dependencies]
     jupyter = [
         "ipykernel>=6.29.5",
         "ipython>=8.29.0",
@@ -41,11 +37,8 @@
         "rich>=13.13.0",
     ]
 
-[tool.setuptools]
-    package-dir = { "" = "src" }
-
 [tool.setuptools.packages.find]
-    where = ["src"]
+    include = ["torchGMM*"]
 
 [tool.setuptools.package-data]
     torchGMM = ["py.typed"]

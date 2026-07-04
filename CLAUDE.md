@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Install:**
 ```bash
-uv pip install -e ".[dev,test]"
+uv pip install -e .
 ```
 
 **Run tests:**
@@ -24,23 +24,26 @@ pytest -n 8                                                      # Run all tests
 
 **Lint and format:**
 ```bash
-ruff check src tests && ruff format src tests
+ruff check torchGMM tests && ruff format torchGMM tests
 ```
 
 **Type check:**
 ```bash
-ty check src
+ty check torchGMM
 ```
 
 ## Architecture
 
-**Public API** (`src/torchGMM/__init__.py`):
+**Public API** (`torchGMM/__init__.py`):
 - `GMM` — batched GMM with diffusion schedule; core class
 - `Conditional` — wraps a single point x0 as a single-component GMM
 - `Schedule` — base class for interpolation schedules
 - `BetaSchedule` — VP-SDE schedule with linear β(t); satisfies α_t² + σ_t² = 1
 - `LinearSchedule` — flow matching / rectified flow schedule; α_t = 1−t, σ_t = t
+- `VESchedule` — variance-exploding (SMLD/NCSN) schedule; α_t ≡ 1, geometric σ_t
+- `KarrasSchedule` — Karras et al. / AlphaFold3-style VE schedule with ρ-controlled step concentration; α_t ≡ 1
 - `forward_sampling`, `reverse_sampling` — Euler-Maruyama SDE/ODE simulation
+- `steered_reverse_sampling` — Feynman-Kac-Corrector (FKC) steered reverse sampling with SMC importance resampling
 
 **Key abstractions:**
 
@@ -48,9 +51,11 @@ ty check src
 - Scalars like `log_prob` / `energy`: `[*N, *B]`
 - Vectors like `score` / `sample`: `[*N, *B, D]`
 
-`Schedule` base class provides `get_alpha_t`, `get_sigma_t`, `forward_drift`, and `diffusion_coeff`. `BetaSchedule` and `LinearSchedule` are concrete implementations.
+`Schedule` base class provides `get_alpha_t`, `get_sigma_t`, `get_dalpha_dt`, `get_dsigma_dt`, `forward_drift`, and `diffusion_coeff`. `BetaSchedule`, `LinearSchedule`, `VESchedule`, and `KarrasSchedule` are concrete implementations; the latter two are variance-exploding (α_t ≡ 1) and typically paired with `diffusion=None` (probability-flow ODE) or the FKC steering sampler below.
 
 `sampling.py` implements Euler-Maruyama for forward and reverse SDEs. Both `forward_sampling` and `reverse_sampling` take `drift: callable`, `diffusion: callable | None`, initial state `x`, and a time grid `t`. The caller constructs drift/diffusion callables from the schedule and GMM score before calling.
+
+`steered_reverse_sampling` runs the same Euler-Maruyama loop as an SMC particle filter: alongside `drift`/`diffusion` it takes a `weight_update(x, t, dt) -> [N]` callable returning incremental log importance weights, and systematically resamples particles whenever ESS/N drops below `ess_threshold`. This implements Feynman-Kac-Corrector steering (see `docs/fkc_steering.md`) to sample from a reward-tilted target `p(x) ∝ q(x) exp(β·r(x))` with exact importance weights, without retraining the underlying model. `notebooks/ve_steering.py` and `notebooks/karras_terminal_variance_steering.py` demonstrate the pattern: a reward `r(x_0)` on denoised samples, a tilt schedule `β(t)`, and gradients of `r` backpropagated through an unrolled ODE denoiser to build `weight_update`.
 
 ## Conventions
 

@@ -38,15 +38,21 @@ B = mu.shape[0]
 EPS, N, T = 1e-3, 1000, 200
 t = torch.linspace(EPS, 1 - EPS, T)
 x0 = gmm.sample(shape=N, t=EPS)  # [N, B, D=1]
-traj = forward_sampling(schedule.forward_drift, schedule.diffusion_coeff, x0, t).detach()  # [T, N, B, D=1]
+traj = forward_sampling(
+    schedule.forward_drift, schedule.diffusion_coeff, x0, t
+).detach()  # [T, N, B, D=1]
 
 # --- limits and marginals (top row) ---
 data_lim = float(mu.abs().max()) + 4 * float(sigma.max())
 traj_lim = float(traj[:, :, :, 0].abs().max()) * 1.05
 noise_lim = float(schedule.get_sigma_t(torch.tensor(1 - EPS))) * 4
 
-x_grid_data = torch.linspace(-data_lim, data_lim, 300).reshape(-1, 1, 1).expand(-1, B, -1)
-x_grid_noise = torch.linspace(-noise_lim, noise_lim, 300).reshape(-1, 1, 1).expand(-1, B, -1)
+x_grid_data = (
+    torch.linspace(-data_lim, data_lim, 300).reshape(-1, 1, 1).expand(-1, B, -1)
+)
+x_grid_noise = (
+    torch.linspace(-noise_lim, noise_lim, 300).reshape(-1, 1, 1).expand(-1, B, -1)
+)
 p_data = gmm.log_prob(x_grid_data, t=EPS).exp().detach()
 p_noise = gmm.log_prob(x_grid_noise, t=1 - EPS).exp().detach()
 
@@ -60,7 +66,9 @@ fig = plt.figure(figsize=(18, 9))
 outer = gridspec.GridSpec(2, 1, height_ratios=[1, 1], hspace=0.35)
 
 # Top: data marginal | overlaid trajectories | noise marginal
-top_gs = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[0], width_ratios=[1, 8, 1], wspace=0.15)
+top_gs = gridspec.GridSpecFromSubplotSpec(
+    1, 3, subplot_spec=outer[0], width_ratios=[1, 8, 1], wspace=0.15
+)
 ax_l = fig.add_subplot(top_gs[0])
 ax_m = fig.add_subplot(top_gs[1])
 ax_r = fig.add_subplot(top_gs[2])
@@ -71,13 +79,17 @@ for b in range(B):
     label = rf"$\mu={float(mu[b, 0, 0]):.1f}$"
 
     ax_l.plot(p_data[:, b].cpu(), x_grid_data[:, b, 0].cpu(), color=c, lw=1.5)
-    ax_l.fill_betweenx(x_grid_data[:, b, 0].cpu(), 0, p_data[:, b].cpu(), color=c, alpha=0.2)
+    ax_l.fill_betweenx(
+        x_grid_data[:, b, 0].cpu(), 0, p_data[:, b].cpu(), color=c, alpha=0.2
+    )
 
     ax_m.plot(t_np, traj[:, :, b, 0].cpu(), color=c, alpha=0.04, lw=0.5)
     ax_m.plot([], [], color=c, lw=2, label=label)
 
     ax_r.plot(p_noise[:, b].cpu(), x_grid_noise[:, b, 0].cpu(), color=c, lw=1.5)
-    ax_r.fill_betweenx(x_grid_noise[:, b, 0].cpu(), 0, p_noise[:, b].cpu(), color=c, alpha=0.2)
+    ax_r.fill_betweenx(
+        x_grid_noise[:, b, 0].cpu(), 0, p_noise[:, b].cpu(), color=c, alpha=0.2
+    )
 
 ax_l.invert_xaxis()
 ax_l.set_title(r"$p(x, t \approx 0)$")
@@ -107,7 +119,9 @@ for s in range(n_seg):
     for b in range(B):
         ax.plot(ts, seg[:, :, b].cpu(), color=colors[b], alpha=0.01, lw=0.5)
         if s == 0:
-            ax.plot([], [], color=colors[b], lw=2, label=rf"$\mu={float(mu[b, 0, 0]):.1f}$")
+            ax.plot(
+                [], [], color=colors[b], lw=2, label=rf"$\mu={float(mu[b, 0, 0]):.1f}$"
+            )
 
     y_min, y_max = float(seg.min()), float(seg.max())
     pad = 0.05 * (y_max - y_min) if y_max > y_min else 1.0
@@ -173,7 +187,12 @@ def denoise(x_t, t, score_fn, sigma_fn):
         t_leaf:     leaf tensor for t   — pass to torch.autograd.grad for ∂/∂t.
     """
     x_t_leaf = x_t.detach().requires_grad_(True)
-    t_leaf = torch.as_tensor(t, dtype=x_t.dtype, device=x_t.device).clone().detach().requires_grad_(True)
+    t_leaf = (
+        torch.as_tensor(t, dtype=x_t.dtype, device=x_t.device)
+        .clone()
+        .detach()
+        .requires_grad_(True)
+    )
     with torch.enable_grad():
         sigma_t = sigma_fn(t_leaf)
         sc = score_fn(x_t_leaf, t_leaf)
@@ -211,7 +230,9 @@ def _reward_and_grads(x_, t_):
     x0, x_leaf, t_leaf = denoise(x_, t_, gmm_mix.score, ve_sched.get_sigma_t)
     rv = r(x0)
     grad_x, grad_t = torch.autograd.grad(rv.sum(), (x_leaf, t_leaf))
-    sc = (x0.detach() - x_leaf.detach()) / ve_sched.get_sigma_t(t_) ** 2  # recover score from x̂_0
+    sc = (x0.detach() - x_leaf.detach()) / ve_sched.get_sigma_t(
+        t_
+    ) ** 2  # recover score from x̂_0
     return rv.detach(), grad_x.detach(), grad_t.detach(), sc
 
 
@@ -229,7 +250,9 @@ def weight_update(x_, t_, dt):
     return (rv + beta * grad_x * (g**2 / 2) * sc).squeeze(-1).squeeze(-1) * dt.abs()
 
 
-traj_unguided = reverse_sampling(reverse_drift, ve_sched.diffusion_coeff, x_init.clone(), t_rev).detach()
+traj_unguided = reverse_sampling(
+    reverse_drift, ve_sched.diffusion_coeff, x_init.clone(), t_rev
+).detach()
 traj_steered, ess_hist = steered_reverse_sampling(
     drift=guided_drift,
     diffusion=ve_sched.diffusion_coeff,
@@ -283,8 +306,21 @@ ax_dens = fig2.add_subplot(gs2[1, 0])
 ax_ess = fig2.add_subplot(gs2[1, 1])
 
 t_rev_np = t_rev.cpu().numpy()
-ax_un.plot(t_rev_np, traj_unguided[:, idx_plot, 0, 0].cpu(), color="steelblue", alpha=0.08, lw=0.5)
-ax_un.axhline(target_c, color="firebrick", ls="--", lw=1.2, alpha=0.8, label=f"target μ={target_c}")
+ax_un.plot(
+    t_rev_np,
+    traj_unguided[:, idx_plot, 0, 0].cpu(),
+    color="steelblue",
+    alpha=0.08,
+    lw=0.5,
+)
+ax_un.axhline(
+    target_c,
+    color="firebrick",
+    ls="--",
+    lw=1.2,
+    alpha=0.8,
+    label=f"target μ={target_c}",
+)
 ax_un.set_title(r"$\leftarrow$ Unguided reverse sampling $\leftarrow$")
 ax_un.set_xlabel("t")
 ax_un.set_ylabel("x")
@@ -292,7 +328,13 @@ y_lim_traj = float(traj_unguided[:, idx_plot, 0, 0].abs().max()) * 1.05
 ax_un.set_ylim(-y_lim_traj, y_lim_traj)
 ax_un.legend(loc="upper left", fontsize=10)
 
-ax_st.plot(t_rev_np, traj_steered[:, idx_plot, 0, 0].cpu(), color="darkorange", alpha=0.08, lw=0.5)
+ax_st.plot(
+    t_rev_np,
+    traj_steered[:, idx_plot, 0, 0].cpu(),
+    color="darkorange",
+    alpha=0.08,
+    lw=0.5,
+)
 ax_st.axhline(target_c, color="firebrick", ls="--", lw=1.2, alpha=0.8)
 ax_st.set_title(r"$\leftarrow$ FKC-steered reverse sampling $\leftarrow$")
 ax_st.set_xlabel("t")
@@ -307,16 +349,32 @@ xs_centers_np = xs_centers.numpy()
 
 # torch.histogram is CPU-only; pin inputs and bins to cpu explicitly.
 edges_cpu = torch.tensor(edges, device="cpu")
-h_un, _ = torch.histogram(traj_unguided[-1, :, 0, 0].cpu(), bins=edges_cpu, density=True)
+h_un, _ = torch.histogram(
+    traj_unguided[-1, :, 0, 0].cpu(), bins=edges_cpu, density=True
+)
 h_st, _ = torch.histogram(traj_steered[-1, :, 0, 0].cpu(), bins=edges_cpu, density=True)
 
 ax_dens.plot(xs_np, p_data.cpu(), color="steelblue", lw=1.5, label="data $p$")
-ax_dens.plot(xs_np, p_tilt.cpu(), color="firebrick", lw=1.5, label=r"tilted $p \cdot e^{r}$")
-ax_dens.bar(
-    xs_centers_np, h_un.numpy(), width=bin_w, alpha=0.35, color="steelblue", label="unguided hist", align="center"
+ax_dens.plot(
+    xs_np, p_tilt.cpu(), color="firebrick", lw=1.5, label=r"tilted $p \cdot e^{r}$"
 )
 ax_dens.bar(
-    xs_centers_np, h_st.numpy(), width=bin_w, alpha=0.45, color="darkorange", label="steered hist", align="center"
+    xs_centers_np,
+    h_un.numpy(),
+    width=bin_w,
+    alpha=0.35,
+    color="steelblue",
+    label="unguided hist",
+    align="center",
+)
+ax_dens.bar(
+    xs_centers_np,
+    h_st.numpy(),
+    width=bin_w,
+    alpha=0.45,
+    color="darkorange",
+    label="steered hist",
+    align="center",
 )
 ax_dens.axvline(target_c, color="firebrick", ls="--", lw=1, alpha=0.7)
 ax_dens.set_xlim(-3, 3)
