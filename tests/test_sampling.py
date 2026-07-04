@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pytest
 import torch
 from conftest import get_local_device
@@ -447,31 +450,6 @@ class TestSteeredSampling:
         )
         return gmm, sched
 
-    def _plot(self, xs_flat, p_data, p_rew, hist, x_final, reward_center, reward_sigma):
-        """Debug helper: plot unguided GMM, reward-tilted ground truth, and steered sample histogram."""
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(xs_flat, p_data, label="Unguided GMM", color="steelblue", linewidth=2)
-        ax.plot(xs_flat, p_rew, label="Reward-tilted (ground truth)", color="firebrick", linewidth=2)
-        ax.stairs(
-            hist,
-            torch.cat([xs_flat[:1] - (xs_flat[1] - xs_flat[0]) / 2, xs_flat + (xs_flat[1] - xs_flat[0]) / 2]),
-            label="Steered samples",
-            fill=True,
-            alpha=0.4,
-            color="seagreen",
-        )
-        ax.axvline(
-            reward_center, color="firebrick", linestyle="--", linewidth=1, label=f"Reward center={reward_center}"
-        )
-        ax.set_title(f"Steered sampling  |  reward_center={reward_center}  reward_sigma={reward_sigma}")
-        ax.set_xlabel("x")
-        ax.set_ylabel("density")
-        ax.legend()
-        plt.tight_layout()
-        plt.show()
-
     @pytest.mark.parametrize(
         "reward_center,reward_sigma,ess_threshold",
         [
@@ -554,7 +532,22 @@ class TestSteeredSampling:
             f"center={reward_center} sigma={reward_sigma}: L2 reward={l2_rew:.4f} should be < L2 unguided={l2_data:.4f}"
         )
 
-        # self._plot(xs_flat, p_data, p_rew, hist, x_final, reward_center, reward_sigma)
+        plot_dir = os.environ.get("TORCHGMM_PLOT_DIR")
+        if plot_dir:
+            plot_steering_result(
+                traj=traj,
+                t=t,
+                ess_hist=ess_hist,
+                xs_flat=xs_flat,
+                p_data=p_data,
+                p_rew=p_rew,
+                hist=hist,
+                reward_center=reward_center,
+                reward_sigma=reward_sigma,
+                ess_threshold=ess_threshold,
+                n_steps=self.N_STEPS,
+                out_path=Path(plot_dir) / f"steered_center{reward_center}_sigma{reward_sigma}_ess{ess_threshold}.png",
+            )
 
 
 class TestDeviceHandling:
@@ -607,3 +600,80 @@ class TestDeviceHandling:
         trajectory = reverse_sampling(drift, schedule.diffusion_coeff, x, t)
         assert trajectory.device == x.device
         assert trajectory.shape == (len(t), 100, 1, 1)
+
+
+def _resample_mode_label(ess_threshold, n_steps):
+    """Human-readable label for the ess_threshold resampling mode (mirrors sampling.py semantics)."""
+    if ess_threshold < 1:
+        return f"adaptive (ESS threshold={ess_threshold})"
+    if ess_threshold >= n_steps - 1:
+        return f"final-only (interval={int(ess_threshold)} ≥ {n_steps - 1} steps)"
+    return f"fixed-interval (every {int(ess_threshold)} steps)"
+
+
+def plot_steering_result(
+    traj, t, ess_hist, xs_flat, p_data, p_rew, hist, reward_center, reward_sigma, ess_threshold, n_steps, out_path
+):
+    """Debug/inspection plot for FKC-steered reverse sampling, inspired by
+    ``notebooks/karras_terminal_variance_steering.py``'s ``plot_run``: a trajectory
+    spaghetti-plot of the steered particles alongside the true (unguided) density,
+    the true reward-tilted target density, and the steered samples' empirical density.
+
+    Args:
+        traj:           [T, N, *rest, D] steered trajectory (as returned by
+                        steered_reverse_sampling)
+        t:              [T] reverse-time grid used for the trajectory's x-axis
+        ess_hist:       ESS/N history (unused for now, kept for future extension)
+        xs_flat:        [G] evaluation grid for the analytic densities
+        p_data:         [G] analytic unguided GMM density on xs_flat
+        p_rew:          [G] analytic reward-tilted target density on xs_flat
+        hist:           [G] empirical density histogram of the final steered samples
+        reward_center:  center of the Gaussian reward potential (for the title/marker)
+        reward_sigma:   width of the Gaussian reward potential (for the title)
+        ess_threshold:  the resampling-mode parameter used for this run (for the title)
+        n_steps:        total number of trajectory time points (len(t))
+        out_path:       where to save the figure (parent dir created if missing)
+    """
+    import matplotlib.gridspec as gridspec
+    import matplotlib.pyplot as plt
+
+    n_particles = traj.shape[1]
+    n_plot = min(400, n_particles)
+    idx_plot = torch.randperm(n_particles)[:n_plot]
+
+    fig = plt.figure(figsize=(13, 5))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1.2], wspace=0.28)
+    ax_traj = fig.add_subplot(gs[0])
+    ax_dens = fig.add_subplot(gs[1])
+
+    ax_traj.plot(t.cpu().numpy(), traj[:, idx_plot, 0, 0].cpu().numpy(), color="darkorange", alpha=0.06, lw=0.5)
+    ax_traj.axhline(reward_center, color="firebrick", ls="--", lw=1.2, label=f"reward center={reward_center}")
+    ax_traj.set_xlabel("t")
+    ax_traj.set_ylabel("x")
+    ax_traj.set_title(r"FKC-steered reverse trajectories $\leftarrow$")
+    ax_traj.legend(loc="upper left", fontsize=9)
+
+    bin_w = xs_flat[1] - xs_flat[0]
+    bin_edges = torch.cat([xs_flat[:1] - bin_w / 2, xs_flat + bin_w / 2])
+    ax_dens.plot(xs_flat.cpu(), p_data.cpu(), label="True unguided density $p$", color="steelblue", linewidth=2)
+    ax_dens.plot(
+        xs_flat.cpu(), p_rew.cpu(), label=r"True tilted density $p \cdot e^{r}$", color="firebrick", linewidth=2
+    )
+    ax_dens.stairs(hist.cpu(), bin_edges.cpu(), label="Steered sample density", fill=True, alpha=0.4, color="seagreen")
+    ax_dens.axvline(reward_center, color="firebrick", linestyle="--", linewidth=1)
+    ax_dens.set_xlabel("x")
+    ax_dens.set_ylabel("density")
+    ax_dens.set_title("Final-time marginal vs. analytic targets")
+    ax_dens.legend(fontsize=9)
+
+    mode_label = _resample_mode_label(ess_threshold, n_steps)
+    fig.suptitle(
+        f"FKC steering — reward_center={reward_center}, reward_sigma={reward_sigma} — resampling: {mode_label}",
+        fontsize=12,
+    )
+    fig.tight_layout()
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
