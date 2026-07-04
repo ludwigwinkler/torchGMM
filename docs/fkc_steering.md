@@ -113,11 +113,23 @@ The broader lesson, consistent with the rest of the appendix: there is a continu
 
 ## Contrast with Product of Experts (D.2)
 
-The "reward does not diffuse" distinction is concrete here. In PoE, both factors $q^1_t, q^2_t$ carry diffusion, which is why their diffusion equations interact to produce a cross term $-\sigma_t^2\langle\nabla\log q^1_t,\nabla\log q^2_t\rangle$ in the weight. In the reward-tilted case, the reward factor contributes a $\Delta r$ (and reward-gradient inner products) instead of a score–score cross term — precisely because $\exp(\beta_t r)$ is not propagated through the Fokker–Planck dynamics.
+The "reward does not diffuse" distinction is concrete here. In PoE, both factors $q^1_t, q^2_t$ carry diffusion, which is why their diffusion equations interact to produce a cross term in the weight of Prop. D.2: $g_t(x) = \sigma_t^2\langle\nabla\log q^1_t,\nabla\log q^2_t\rangle - \langle f_t, \nabla\log q^1_t + \nabla\log q^2_t\rangle$ — note the cross term carries a **positive** $\sigma_t^2$ coefficient in the final result (the diffusion-only lemma, Prop. C.8, contributes it with a *negative* sign in isolation, but combining it with the continuity-equation cross term from Prop. C.7 flips the net sign to positive). In the reward-tilted case, the reward factor contributes a $\Delta r$ (and reward-gradient inner products) instead of a score–score cross term — precisely because $\exp(\beta_t r)$ is not propagated through the Fokker–Planck dynamics.
 
 ---
 
 # Generalization: time-dependent reward $r(x, t)$
+
+**Note: everything below this point is *not* in the paper.** Skreta et al. only ever
+treat time-dependence of the temperature schedule $\beta_t$ (their Prop. C.6); Prop.
+D.6 itself uses a reward $r(x)$ static in $x$'s time-dependence, and their Conclusion
+says so explicitly ("...allows for the use of reward models (Prop. D.6) and for a
+time-dependent annealing schedule $\beta_t$ (Prop. C.6)" — no mention of a spatially-
+evaluated, explicitly time-dependent $r(x,t)$). What follows is an original extension
+of the same proof technique to that case, not a transcription of a paper result. It
+has been independently re-derived and checked (the extra $\beta_t\partial_t r$ term is
+purely additive/temporal and doesn't interact with any spatial cancellation, so the
+Laplacian and $\beta_t^2\|\nabla r\|^2$ cancellations below still go through), but treat
+it accordingly.
 
 Now suppose the reward carries explicit time dependence, $r = r(x, t)$, so the tilt is $\exp(\beta_t\, r(x,t))$ and the target is
 
