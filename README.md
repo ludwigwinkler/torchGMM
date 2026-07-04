@@ -82,6 +82,8 @@ samples = gmm.sample(5000)           # [N, *B, D]
 
 ### Running the Forward & Reverse SDE
 
+The sampling code follows a functional style where functions in spirit closer to jax than to PyTorch, where reverse drift and diffusion callables are pased to the integrators.
+
 `forward_sampling` / `reverse_sampling` accept `drift` and `diffusion` callables, so
 the schedule and the GMM score combine explicitly into the reverse SDE drift:
 
@@ -127,11 +129,11 @@ s = cond.score(x, t=0.6)
 
 ### Shape Convention
 
-| Symbol | Meaning |
-|---|---|
-| `*B` | Batch dimensions (from GMM init, e.g. number of parallel GMMs) |
-| `K` | Number of mixture components |
-| `D` | Data dimensionality |
-| `*N` | Sample dimensions (optional leading dims on inputs) |
+| Symbol | Meaning                                                        |
+| ------ | -------------------------------------------------------------- |
+| `*B`   | Batch dimensions (from GMM init, e.g. number of parallel GMMs) |
+| `K`    | Number of mixture components                                   |
+| `D`    | Data dimensionality                                            |
+| `*N`   | Sample dimensions (optional leading dims on inputs)            |
 
 Inputs are `[*N, *B, D]`. Scalar outputs (`log_prob`, `energy`) are `[*N, *B]`. Vector outputs (`score`, `sample`) are `[*N, *B, D]`.
