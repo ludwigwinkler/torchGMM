@@ -45,11 +45,11 @@ This allows you to sample from very particular regions of the sampling space wit
 ## Installation
 
 ```bash
-# editable install with dev + test extras
-pip install -e ".[dev,test]"
+# editable install
+pip install -e .
 
 # or with uv
-uv pip install -e ".[dev,test]"
+uv pip install -e .
 ```
 
 Requires Python ≥ 3.10 and PyTorch ≥ 2.7.

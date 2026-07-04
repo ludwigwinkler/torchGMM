@@ -4,7 +4,7 @@
 
 ```bash
 # Install package with dev dependencies
-uv pip install -e ".[dev,test]"
+uv pip install -e .
 
 # Run all tests (parallel by default)
 pytest
@@ -19,12 +19,12 @@ pytest tests/test_gmm.py::TestShapes::test_gmm_initialization
 pytest -m "not slow"
 
 # Lint and format
-black src tests && isort src tests && flake8 src tests
+black torchGMM tests && isort torchGMM tests && flake8 torchGMM tests
 ```
 
 ## Architecture
 
-**Core abstractions** (all in `src/torchGMM/`):
+**Core abstractions** (all in `torchGMM/`):
 - `GMM` — Batched GMM with diffusion schedule. Params are `[*B, K, D]` (batch, components, dims). Supports `log_prob`, `score`, `sample`, `energy` with time `t ∈ [0,1]`.
 - `Conditional` — Subclass of `GMM` for conditional processes from a single point `x0`.
 - `BetaSchedule` — Linear β schedule for the forward SDE. Provides `alpha_t`, `sigma_t` coefficients.
