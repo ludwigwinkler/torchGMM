@@ -795,19 +795,30 @@ def _resample_mode_label(ess_threshold, n_steps):
     return f"fixed-interval (every {int(ess_threshold)} steps)"
 
 
+def _count_resamples(ess_threshold, ess_hist, n_steps):
+    """Number of intermittent resamples implied by ess_threshold (mirrors the
+    should_resample logic in steered_reverse_sampling; doesn't count the mandatory
+    final resample after the loop, which isn't reflected in ess_hist)."""
+    if ess_threshold < 1:
+        return sum(1 for e in ess_hist if e < ess_threshold)
+    resample_every = int(ess_threshold)
+    return sum(1 for step in range(n_steps - 1) if (step + 1) % resample_every == 0)
+
+
 def plot_steering_result(
     traj, t, ess_hist, xs_flat, p_data, p_rew, hist, reward_center, reward_sigma, ess_threshold, n_steps, out_path
 ):
     """Debug/inspection plot for FKC-steered reverse sampling, inspired by
     ``notebooks/karras_terminal_variance_steering.py``'s ``plot_run``: a trajectory
-    spaghetti-plot of the steered particles alongside the true (unguided) density,
-    the true reward-tilted target density, and the steered samples' empirical density.
+    spaghetti-plot of the steered particles, the true (unguided) density, the true
+    reward-tilted target density and the steered samples' empirical density, and the
+    ESS/N history over the reverse pass.
 
     Args:
         traj:           [T, N, *rest, D] steered trajectory (as returned by
                         steered_reverse_sampling)
         t:              [T] reverse-time grid used for the trajectory's x-axis
-        ess_hist:       ESS/N history (unused for now, kept for future extension)
+        ess_hist:       ESS/N history, len = T - 1 (one entry per integration step)
         xs_flat:        [G] evaluation grid for the analytic densities
         p_data:         [G] analytic unguided GMM density on xs_flat
         p_rew:          [G] analytic reward-tilted target density on xs_flat
@@ -825,10 +836,11 @@ def plot_steering_result(
     n_plot = min(400, n_particles)
     idx_plot = torch.randperm(n_particles)[:n_plot]
 
-    fig = plt.figure(figsize=(13, 5))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1.2], wspace=0.28)
+    fig = plt.figure(figsize=(18, 5))
+    gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1.15, 1.15], wspace=0.3)
     ax_traj = fig.add_subplot(gs[0])
     ax_dens = fig.add_subplot(gs[1])
+    ax_ess = fig.add_subplot(gs[2])
 
     ax_traj.plot(t.cpu().numpy(), traj[:, idx_plot, 0, 0].cpu().numpy(), color="darkorange", alpha=0.06, lw=0.5)
     ax_traj.axhline(reward_center, color="firebrick", ls="--", lw=1.2, label=f"reward center={reward_center}")
@@ -849,6 +861,17 @@ def plot_steering_result(
     ax_dens.set_ylabel("density")
     ax_dens.set_title("Final-time marginal vs. analytic targets")
     ax_dens.legend(fontsize=9)
+
+    n_resamples = _count_resamples(ess_threshold, ess_hist, n_steps)
+    t_ess = t[:-1].cpu().numpy()  # ess_hist has one entry per completed step, len(t) - 1
+    ax_ess.plot(t_ess, ess_hist, color="darkorange", lw=1.2, label="ESS / N")
+    if ess_threshold < 1:
+        ax_ess.axhline(ess_threshold, color="red", ls="--", lw=1, label=f"threshold={ess_threshold}")
+    ax_ess.set_ylim(0, 1.05)
+    ax_ess.set_xlabel("t")
+    ax_ess.set_ylabel("ESS / N")
+    ax_ess.set_title(f"ESS history ({n_resamples} intermittent resamples)")
+    ax_ess.legend(fontsize=9)
 
     mode_label = _resample_mode_label(ess_threshold, n_steps)
     fig.suptitle(
