@@ -7,7 +7,7 @@ from conftest import get_local_device
 
 from torchGMM.gmm import GMM
 from torchGMM.sampling import _ess_ratio, forward_sampling, reverse_sampling, steered_reverse_sampling
-from torchGMM.schedule import BetaSchedule, LinearSchedule
+from torchGMM.schedule import BetaSchedule, KarrasSchedule, LinearSchedule
 
 torch.set_printoptions(sci_mode=False)
 
@@ -547,6 +547,131 @@ class TestSteeredSampling:
                 ess_threshold=ess_threshold,
                 n_steps=self.N_STEPS,
                 out_path=Path(plot_dir) / f"steered_center{reward_center}_sigma{reward_sigma}_ess{ess_threshold}.png",
+            )
+
+
+@pytest.mark.slow
+class TestSteeredSamplingKarras:
+    """SMC-steered reverse sampling via FKC weight update, under the (variance-exploding)
+    KarrasSchedule instead of BetaSchedule — same resampling-mode coverage as
+    TestSteeredSampling, but exercising a schedule with forward_drift ≡ 0 and a
+    non-affine, ρ-warped σ(t). guided_drift/fkc_weight_update are schedule-agnostic
+    (they call sched.forward_drift/sched.diffusion_coeff generically), so the only
+    real change from TestSteeredSampling is drawing x0 from the schedule's own noise
+    marginal (gmm.sample(t=T_NOISE)) instead of assuming unit-variance noise.
+    """
+
+    EPS = 0.001
+    T_NOISE = 1 - EPS
+    N_PARTICLES = 20_000
+    N_STEPS = 500
+
+    @pytest.fixture
+    def setup(self):
+        sched = KarrasSchedule(sigma_min=4e-4, sigma_max=5.0, rho=7.0, sigma_data=1.0)
+        gmm = GMM(
+            mu=torch.tensor([[[-2.5], [2.5]]]),
+            sigma=torch.tensor([[[0.8], [0.8]]]),
+            weight=torch.tensor([[0.2, 0.8]]),
+            schedule=sched,
+        )
+        return gmm, sched
+
+    @pytest.mark.parametrize(
+        "ess_threshold",
+        [
+            0.95,  # adaptive
+            25,  # fixed-interval: resample every 25 of the 499 integration steps
+            100_000,  # final-only: interval far exceeds 499 integration steps
+        ],
+        ids=lambda v: f"{v}",
+    )
+    def test_steered_sampling_karras(self, setup, ess_threshold):
+        gmm, sched = setup
+        reward_center, reward_sigma = -1.5, 1.0
+
+        def r(x):
+            return -0.5 * (x - reward_center) ** 2 / reward_sigma**2
+
+        def grad_r(x):
+            return -(x - reward_center) / reward_sigma**2
+
+        def guided_drift(x, t):
+            f = sched.forward_drift(x, t)  # ≡ 0 for KarrasSchedule
+            sigma = sched.diffusion_coeff(t)
+            score = gmm.score(x, t)
+            beta = 1.0 - t
+            return f - sigma**2 * score - beta * (sigma**2 / 2) * grad_r(x)
+
+        def fkc_weight_update(x, t, dt):
+            f = sched.forward_drift(x, t)  # ≡ 0 for KarrasSchedule
+            sigma = sched.diffusion_coeff(t)
+            score = gmm.score(x, t)
+            rg, rv = grad_r(x), r(x)
+            beta = 1.0 - t
+            term1 = rv
+            term2 = -(beta * rg) * f
+            term3 = (beta * rg) * (sigma**2 / 2) * score
+            return (term1 + term2 + term3).squeeze(-1).squeeze(-1) * dt.abs()
+
+        t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
+        x0 = gmm.sample(shape=self.N_PARTICLES, t=self.T_NOISE)
+        traj, ess_hist = steered_reverse_sampling(
+            guided_drift, sched.diffusion_coeff, fkc_weight_update, x0, t, ess_threshold=ess_threshold
+        )
+
+        # 1. Trajectory shape
+        assert traj.shape == (self.N_STEPS, self.N_PARTICLES, 1, 1)
+
+        # 2. ESS/N history within [0, 1] at every step
+        assert len(ess_hist) == self.N_STEPS - 1
+        for ess in ess_hist:
+            assert 0.0 <= ess <= 1.0
+
+        # Ground truth: reward-tilted density
+        xs = torch.linspace(-6, 6, 500).reshape(-1, 1, 1)
+        log_p_data = gmm.log_prob(xs, t=self.EPS).squeeze()
+        log_p_rew = log_p_data + (1.0 - self.EPS) * r(xs).squeeze()
+        log_p_rew = log_p_rew - log_p_rew.max()
+        p_rew = log_p_rew.exp()
+        p_rew = p_rew / torch.trapezoid(p_rew, xs.squeeze())
+
+        p_data = log_p_data.exp()
+        p_data = p_data / torch.trapezoid(p_data, xs.squeeze())
+
+        # Build histogram of final samples
+        x_final = traj[-1, :, 0, 0]
+        xs_flat = xs.squeeze()
+        dx = xs_flat[1] - xs_flat[0]
+        bin_edges = torch.cat([(xs_flat[0] - dx / 2).unsqueeze(0), xs_flat + dx / 2])
+        hist, _ = torch.histogram(x_final, bins=bin_edges, density=True)
+
+        # 4. L2 vs reward-tilted target < 0.1
+        l2_rew = torch.sqrt(((hist - p_rew) ** 2).mean()).item()
+        assert l2_rew < 0.1, f"KarrasSchedule ess_threshold={ess_threshold}: L2 vs reward-tilted={l2_rew:.4f}"
+
+        # 5. Steered samples closer to reward-tilted target than unguided
+        l2_data = torch.sqrt(((hist - p_data) ** 2).mean()).item()
+        assert l2_rew < l2_data, (
+            f"KarrasSchedule ess_threshold={ess_threshold}: "
+            f"L2 reward={l2_rew:.4f} should be < L2 unguided={l2_data:.4f}"
+        )
+
+        plot_dir = os.environ.get("TORCHGMM_PLOT_DIR")
+        if plot_dir:
+            plot_steering_result(
+                traj=traj,
+                t=t,
+                ess_hist=ess_hist,
+                xs_flat=xs_flat,
+                p_data=p_data,
+                p_rew=p_rew,
+                hist=hist,
+                reward_center=reward_center,
+                reward_sigma=reward_sigma,
+                ess_threshold=ess_threshold,
+                n_steps=self.N_STEPS,
+                out_path=Path(plot_dir) / f"steered_karras_ess{ess_threshold}.png",
             )
 
 
