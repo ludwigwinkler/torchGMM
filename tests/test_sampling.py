@@ -3,7 +3,7 @@ import torch
 from conftest import get_local_device
 
 from torchGMM.gmm import GMM
-from torchGMM.sampling import forward_sampling, reverse_sampling, steered_reverse_sampling
+from torchGMM.sampling import _ess_ratio, forward_sampling, reverse_sampling, steered_reverse_sampling
 from torchGMM.schedule import BetaSchedule, LinearSchedule
 
 torch.set_printoptions(sci_mode=False)
@@ -320,6 +320,115 @@ class TestValidation:
         assert not torch.allclose(traj1[-1], traj2[-1])
 
 
+class TestSteeredSamplingResampleModes:
+    """Deterministic control-flow verification for the ess_threshold resampling modes.
+
+    Harness: zero drift + diffusion=None means particle *values* never change except
+    via resampling's index-selection (gather) — so every value in the returned
+    trajectory must come from the original `x0` pool, in every mode. The weight_update
+    returns a fixed per-slot bias independent of x/t, so with a constant-dt time grid
+    the whole ESS trace is a deterministic function of "steps since last reset" —
+    reproducible in the test via the same `_ess_ratio` helper (this tests the
+    resample-timing control flow, not `_ess_ratio`'s own math). No `torch.manual_seed`
+    is needed anywhere: every assertion holds regardless of `_systematic_resample`'s
+    internal `torch.rand(1)` draw, so these tests can't flake under xdist.
+    """
+
+    N = 50
+    N_STEPS = 21  # -> 20 integration steps
+    K = 3.0
+
+    @staticmethod
+    def _zero_drift(x, t):
+        return torch.zeros_like(x)
+
+    def _weight_update(self, x, t, dt):
+        bias = torch.linspace(-self.K, self.K, x.shape[0])
+        return bias * dt.abs()
+
+    def _predict_ess_history(self, t, trigger_fn):
+        """Replay the same reset-on-trigger recursion the implementation runs.
+
+        Mirrors the real loop's `dt = t_next - t_curr` scaling exactly, since
+        `weight_update` multiplies the fixed bias by `dt.abs()` every step.
+        """
+        bias = torch.linspace(-self.K, self.K, self.N)
+        log_w = torch.zeros(self.N)
+        history = []
+        for t_curr, t_next in zip(t[:-1], t[1:]):
+            dt = t_next - t_curr
+            log_w = log_w + bias * dt.abs()
+            ess = _ess_ratio(log_w)
+            history.append(ess)
+            if trigger_fn(len(history) - 1, ess):
+                log_w = torch.zeros(self.N)
+        return history
+
+    def test_adaptive_mode_matches_prediction(self):
+        x0 = torch.randn(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
+        threshold = 0.7
+        traj, ess_hist = steered_reverse_sampling(
+            self._zero_drift, None, self._weight_update, x0, t, ess_threshold=threshold
+        )
+        predicted = self._predict_ess_history(t, lambda step, ess: ess < threshold)
+        assert ess_hist == pytest.approx(predicted, abs=1e-6)
+        assert torch.isin(traj, x0).all()
+
+    def test_interval_mode_matches_prediction(self):
+        x0 = torch.randn(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)  # 20 integration steps
+        interval = 5
+        traj, ess_hist = steered_reverse_sampling(
+            self._zero_drift, None, self._weight_update, x0, t, ess_threshold=interval
+        )
+        # sanity check independent of the implementation's own formula: with 20 steps
+        # and interval=5, triggers land at completed-step counts 5, 10, 15, 20.
+        expected_trigger_steps = [4, 9, 14, 19]  # 0-indexed step at which (step+1) % 5 == 0
+        assert [s for s in range(20) if (s + 1) % interval == 0] == expected_trigger_steps
+
+        predicted = self._predict_ess_history(t, lambda step, ess: (step + 1) % interval == 0)
+        assert ess_hist == pytest.approx(predicted, abs=1e-6)
+        assert len(ess_hist) == self.N_STEPS - 1
+        assert torch.isin(traj, x0).all()
+
+    def test_interval_larger_than_steps_is_final_only(self):
+        x0 = torch.randn(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)  # 20 integration steps
+        traj, ess_hist = steered_reverse_sampling(
+            self._zero_drift, None, self._weight_update, x0, t, ess_threshold=10_000
+        )
+        # interval >> total steps -> no intermittent trigger ever fires
+        predicted = self._predict_ess_history(t, lambda step, ess: False)
+        assert ess_hist == pytest.approx(predicted, abs=1e-6)
+        assert torch.isin(traj, x0).all()
+
+    def test_ess_equal_one_resamples_every_step(self):
+        x0 = torch.randn(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
+        traj, ess_hist = steered_reverse_sampling(self._zero_drift, None, self._weight_update, x0, t, ess_threshold=1)
+        # ess_threshold == 1 selects interval mode with resample_every=1 (every step),
+        # not adaptive mode (which would resample whenever ess < 1, i.e. also nearly
+        # every step here -- so cross-check against the interval prediction specifically).
+        predicted = self._predict_ess_history(t, lambda step, ess: (step + 1) % 1 == 0)
+        assert ess_hist == pytest.approx(predicted, abs=1e-6)
+        assert torch.isin(traj, x0).all()
+
+    @pytest.mark.parametrize("bad_threshold", [0, -1, -0.5])
+    def test_non_positive_threshold_rejected(self, bad_threshold):
+        x0 = torch.randn(4, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, 5)
+        with pytest.raises(ValueError, match="positive"):
+            steered_reverse_sampling(self._zero_drift, None, self._weight_update, x0, t, ess_threshold=bad_threshold)
+
+    @pytest.mark.parametrize("bad_threshold", [2.5, 1.5, 10.25])
+    def test_non_integer_interval_threshold_rejected(self, bad_threshold):
+        x0 = torch.randn(4, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, 5)
+        with pytest.raises(ValueError, match="whole number"):
+            steered_reverse_sampling(self._zero_drift, None, self._weight_update, x0, t, ess_threshold=bad_threshold)
+
+
 @pytest.mark.slow
 class TestSteeredSampling:
     """SMC-steered reverse sampling via FKC weight update."""
@@ -364,11 +473,19 @@ class TestSteeredSampling:
         plt.show()
 
     @pytest.mark.parametrize(
-        "reward_center,reward_sigma",
-        [(-2.0, 1.0), (-1.5, 1.0), (-1.5, 1.5), (-1.0, 1.0), (-1.0, 1.5)],
+        "reward_center,reward_sigma,ess_threshold",
+        [
+            (-2.0, 1.0, 0.95),
+            (-1.5, 1.0, 0.95),
+            (-1.5, 1.5, 0.95),
+            (-1.0, 1.0, 0.95),
+            (-1.0, 1.5, 0.95),
+            (-1.5, 1.0, 25),  # fixed-interval: resample every 25 of the 499 integration steps
+            (-1.5, 1.0, 100_000),  # final-only: interval far exceeds 499 integration steps
+        ],
         ids=lambda v: f"{v}",
     )
-    def test_steered_sampling(self, setup, reward_center, reward_sigma):
+    def test_steered_sampling(self, setup, reward_center, reward_sigma, ess_threshold):
         gmm, sched = setup
 
         def r(x):
@@ -398,7 +515,7 @@ class TestSteeredSampling:
         t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
         x0 = torch.randn(self.N_PARTICLES, 1, 1)
         traj, ess_hist = steered_reverse_sampling(
-            guided_drift, sched.diffusion_coeff, fkc_weight_update, x0, t, ess_threshold=0.95
+            guided_drift, sched.diffusion_coeff, fkc_weight_update, x0, t, ess_threshold=ess_threshold
         )
 
         # 1. Trajectory shape

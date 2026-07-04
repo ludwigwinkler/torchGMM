@@ -109,7 +109,7 @@ def steered_reverse_sampling(
     weight_update: Callable,
     x: Float[Tensor, "N *rest D"],
     t: Float[Tensor, " T"],
-    ess_threshold: float = 0.5,
+    ess_threshold: float | int = 0.5,
 ) -> tuple[Float[Tensor, "T N *rest D"], list[float]]:
     """Reverse SDE/ODE sampling with SMC particle correction via importance resampling.
 
@@ -119,7 +119,17 @@ def steered_reverse_sampling(
         weight_update:  (x, t, dt) -> [N] incremental log weight per particle
         x:              [N, *rest, D] initial state; N = number of particles
         t:              1D strictly decreasing time grid in [0, 1], >= 2 points
-        ess_threshold:  resample when ESS/N drops below this value
+        ess_threshold:  Controls the resampling strategy:
+                          - 0 < ess_threshold < 1: adaptive — resample whenever
+                            ESS/N drops below this value.
+                          - ess_threshold >= 1 (must be a whole number): fixed-interval
+                            — resample unconditionally every int(ess_threshold) steps,
+                            regardless of ESS (ess_threshold == 1 resamples every step).
+                          - If the interval is >= len(t) - 1 (the total number of
+                            integration steps), no intermittent resample ever fires;
+                            weights accumulate over the whole trajectory and only the
+                            mandatory resample after the final step (always applied)
+                            corrects the particles.
 
     Returns:
         trajectory:     [T, N, *rest, D]
@@ -128,6 +138,15 @@ def steered_reverse_sampling(
     _validate_time_grid(t)
     if not torch.all(t[1:] < t[:-1]):
         raise ValueError("t must be strictly decreasing for steered_reverse_sampling")
+    if ess_threshold <= 0:
+        raise ValueError(f"ess_threshold must be positive, got {ess_threshold}")
+    if ess_threshold >= 1 and ess_threshold != int(ess_threshold):
+        raise ValueError(
+            f"ess_threshold >= 1 selects fixed-interval resampling and must be a "
+            f"whole number of steps, got {ess_threshold}"
+        )
+    interval_mode = ess_threshold >= 1
+    resample_every = int(ess_threshold) if interval_mode else 1  # unused when not interval_mode
 
     log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
     trajectory = [x.clone()]
@@ -143,7 +162,12 @@ def steered_reverse_sampling(
         ess = _ess_ratio(log_w)
         ess_history.append(ess)
 
-        if ess < ess_threshold:
+        if interval_mode:
+            should_resample = (step + 1) % resample_every == 0
+        else:
+            should_resample = ess < ess_threshold
+
+        if should_resample:
             idx = _systematic_resample(log_w)
             x = x[idx]
             log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
