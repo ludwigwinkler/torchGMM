@@ -242,8 +242,21 @@ class GMM(torch.nn.Module):
         sample_shape = x.shape[: -(self.batch_ndim + 1)]
         t_exp = self._expand_t(t, sample_shape)
         assert t_exp.shape == x.shape[:-1], f"t_exp must have shape {x.shape[:-1]}, got {t_exp.shape}"
-        x_grad = x.detach().clone().requires_grad_(True)
-        score = torch.autograd.grad(self._gmm_t(t_exp).log_prob(x_grad).sum(), x_grad, create_graph=False)[0].detach()
+        # If x (or t) already requires grad, the caller wants to differentiate
+        # *through* the score — e.g. reconstruction/x̂0 guidance, where
+        # x̂0 = x + σ²·score must carry the full denoiser Jacobian ∂score/∂x_t (and
+        # ∂score/∂t). Compute the score on x itself with create_graph=True and do NOT
+        # detach, so that Jacobian flows back. Otherwise (the usual drift-term use)
+        # return score as a plain detached value — cheaper, no second-order graph.
+        if x.requires_grad or (isinstance(t_exp, Tensor) and t_exp.requires_grad):
+            score = torch.autograd.grad(
+                self._gmm_t(t_exp).log_prob(x).sum(), x, create_graph=True
+            )[0]
+        else:
+            x_grad = x.detach().clone().requires_grad_(True)
+            score = torch.autograd.grad(
+                self._gmm_t(t_exp).log_prob(x_grad).sum(), x_grad, create_graph=False
+            )[0].detach()
         return score
 
     @jaxtyped(typechecker=beartype)
