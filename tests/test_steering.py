@@ -9,7 +9,7 @@ from torchGMM.schedule import BetaSchedule, KarrasSchedule
 
 torch.set_printoptions(sci_mode=False)
 
-PLOT = True  # flip to True locally to save FKC steering diagnostic plots next to this file
+PLOT = False  # flip to True locally to save FKC steering diagnostic plots next to this file
 PLOT_DIR = Path(__file__).parent
 
 
