@@ -16,9 +16,9 @@ $$dX_t = -\tfrac{1}{2}\,\beta(t)\,X_t\,dt + \sqrt{\beta(t)}\,dW_t$$
 
 with linear schedule $\beta(t) = \beta_\text{min} + t  (\beta_\text{max} - \beta_\text{min})$.
 
-The marginal at time $t$ of a GMM $p_0(x) = \sum_k \pi_k\,\mathcal{N}(x;\mu_k, \Sigma_k)$ is again a GMM:
+The marginal at time $t$ of a GMM $p_0(x) = \sum_k \pi_k \ \mathcal{N}(x;\mu_k, \Sigma_k)$ is again a GMM:
 
-$$p_t(x) = \sum_k \pi_k\,\mathcal{N}\!\bigl(x;\,\alpha_t\,\mu_k,\;\sigma_t^2 I + \alpha_t^2\,\Sigma_k\bigr)$$
+$$p_t(x) = \sum_k \pi_k\,\mathcal{N} \ \bigl(x;\,\alpha_t\,\mu_k,\;\sigma_t^2 I + \alpha_t^2\,\Sigma_k\bigr)$$
 
 where $\alpha_t = \exp\!\bigl(-\tfrac{1}{2}\int_0^t \beta(s)\,ds\bigr)$ and $\sigma_t = \sqrt{1 - \alpha_t^2}$.
 
