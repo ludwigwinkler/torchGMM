@@ -1,6 +1,9 @@
 # git worktrees (created via `git worktree add worktrees/<name>`)
 /worktrees/
 
+# FKC steering debug plots (tests/test_steering.py, generated when PLOT=True)
+tests/steered_*.png
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

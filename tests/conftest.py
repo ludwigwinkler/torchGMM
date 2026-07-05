@@ -10,9 +10,9 @@ import matplotlib
 
 matplotlib.use("Agg")  # non-interactive backend; suppresses plot windows in tests
 
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
 
 import torch  # noqa: E402
 
