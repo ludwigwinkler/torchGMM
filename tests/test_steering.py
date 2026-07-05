@@ -9,7 +9,7 @@ from torchGMM.schedule import BetaSchedule, KarrasSchedule
 
 torch.set_printoptions(sci_mode=False)
 
-PLOT = False  # flip to True locally to save FKC steering diagnostic plots next to this file
+PLOT = True  # flip to True locally to save FKC steering diagnostic plots next to this file
 PLOT_DIR = Path(__file__).parent
 
 
@@ -293,8 +293,8 @@ class TestSteeredSamplingKarras:
     def setup(self):
         sched = KarrasSchedule(sigma_min=4e-4, sigma_max=160.0, rho=7.0, sigma_data=1.0)
         gmm = GMM(
-            mu=torch.tensor([[[-2.5], [2.5]]]),
-            sigma=torch.tensor([[[0.8], [0.8]]]),
+            mu=torch.tensor([[[-1], [1]]]),
+            sigma=torch.tensor([[[0.4], [0.4]]]),
             weight=torch.tensor([[0.2, 0.8]]),
             schedule=sched,
         )
@@ -333,7 +333,7 @@ class TestSteeredSamplingKarras:
         ],
         ids=lambda v: f"{v}",
     )
-    @pytest.mark.parametrize("reward_center", [-1.5, -0.5, 1.0], ids=lambda v: f"{v}")
+    @pytest.mark.parametrize("reward_center", [-0.75, 0.25, 1.0], ids=lambda v: f"{v}")
     def test_steered_sampling_karras(self, setup, reward_center, ess_threshold):
         gmm, sched = setup
         reward_sigma = 1.0
@@ -393,7 +393,7 @@ class TestSteeredSamplingKarras:
 
         # Ground truth: reward-tilted density. beta_fn(EPS) ≈ 1 (data time), matching
         # the tilt weight the sampler itself applies at the end of the reverse pass.
-        xs = torch.linspace(-6, 6, 100).reshape(-1, 1, 1)
+        xs = torch.linspace(-3, 3, 100).reshape(-1, 1, 1)
         log_p_data = gmm.log_prob(xs, t=self.EPS).squeeze()
         log_p_rew = log_p_data + beta_fn(torch.tensor(self.EPS)) * r(xs).squeeze()
         log_p_rew = log_p_rew - log_p_rew.max()
