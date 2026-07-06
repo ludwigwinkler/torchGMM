@@ -280,8 +280,8 @@ class KarrasSchedule(Schedule):
         return (
             self.sigma_data
             * self.rho
-            * u ** (self.rho - 1)
             * (self._u_max - self._u_min)
+            * u ** (self.rho - 1)
         )
 
     @jaxtyped(typechecker=beartype)

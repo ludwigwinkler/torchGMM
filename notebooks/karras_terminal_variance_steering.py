@@ -15,6 +15,7 @@ reverse sampling doesn't depend on the denoiser, so it is only run once per
 """
 
 from pathlib import Path
+import sys
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
@@ -35,7 +36,7 @@ device = torch.device("cpu")
 torch.set_default_device(device)
 
 # --- fixed mixture (B=1, K=4) ---
-mu_mix = torch.tensor([[[-1.0], [-0.0], [1.0], [2.0]]])  # [B=1, K=4, D=1]
+mu_mix = torch.tensor([[[-1.0], [-0.25], [0.25], [1.0]]])  # [B=1, K=4, D=1]
 sigma_mix = torch.tensor([[[0.3], [0.2], [0.3], [0.1]]])  # [B=1, K=4, D=1]
 weight_mix = torch.tensor([[0.25, 0.25, 0.25, 0.25]])  # [B=1, K=4]
 
@@ -51,12 +52,54 @@ def r(x_0):
 # --- fixed reverse-sampling hyperparameters ---
 T_NOISE = 0.99  # reverse-sampling start time (near pure noise)
 T_DATA = 1e-3  # reverse-sampling end time (near data)
-N_PARTICLES = 5_000  # SMC particle count
+N_PARTICLES = 1_000  # SMC particle count
 N_STEPS = 200  # number of reverse-time integrator steps
 ESS_THRESHOLD = 0.8  # systematic-resample when ESS/N drops below this
 N_PLOT = 600
-SIGMA_MAX_SWEEP = [20.0, 40.0, 160.0]  # 160 is the AF3 default
+SIGMA_MAX_SWEEP = [160.0]  # 160 is the AF3 default
 
+
+# %%
+# --- visualize the Karras marginal noise schedule and induced variance rate ---
+t_schedule = torch.linspace(0.0, 1.0, 400)
+colors_schedule = plt.get_cmap("viridis")(np.linspace(0.15, 0.85, len(SIGMA_MAX_SWEEP)))
+
+fig_karras, (ax_sigma, ax_dsigma, ax_prod) = plt.subplots(1, 3, figsize=(15, 4))
+for color, sigma_max in zip(colors_schedule, SIGMA_MAX_SWEEP):
+    schedule_plot = KarrasSchedule(sigma_min=4e-4, sigma_max=sigma_max, rho=7.0, sigma_data=1.0)
+    sigma_t = schedule_plot.get_sigma_t(t_schedule)
+    dsigma_dt = schedule_plot.get_dsigma_dt(t_schedule)
+    sigma_dsigma_dt = sigma_t * dsigma_dt
+    label = rf"$\sigma_{{\max}}={sigma_max:g}$"
+
+    ax_sigma.plot(t_schedule.cpu(), sigma_t.cpu(), color=color, lw=2, label=label)
+    ax_dsigma.plot(t_schedule.cpu(), dsigma_dt.cpu(), color=color, lw=2, label=label)
+    ax_prod.plot(t_schedule.cpu(), sigma_dsigma_dt.cpu(), color=color, lw=2, label=label)
+
+ax_sigma.set_xlabel("t")
+ax_sigma.set_ylabel(r"$\bar\sigma(t)$")
+ax_sigma.set_title(r"Karras marginal noise $\bar\sigma(t)$")
+# ax_sigma.set_yscale("log")
+ax_sigma.grid(True, which="both", alpha=0.25)
+ax_sigma.legend(fontsize=8)
+
+ax_dsigma.set_xlabel("t")
+ax_dsigma.set_ylabel(r"$d\bar\sigma(t)/dt$")
+ax_dsigma.set_title(r"Time derivative $d\bar\sigma/dt$")
+# ax_dsigma.set_yscale("log")
+ax_dsigma.grid(True, which="both", alpha=0.25)
+
+ax_prod.set_xlabel("t")
+ax_prod.set_ylabel(r"$\bar\sigma(t)\,d\bar\sigma(t)/dt$")
+ax_prod.set_title(r"Half variance rate: $g(t)^2/2$")
+# ax_prod.set_yscale("log")
+ax_prod.grid(True, which="both", alpha=0.25)
+
+fig_karras.tight_layout()
+fig_karras.savefig(OUT_DIR / "karras_variance_schedule.png", dpi=120, bbox_inches="tight")
+plt_show()
+
+sys.exit()
 
 # --- tilt schedule beta_t (0 at noise, 1 at data) ---
 # Cosine ramp: smooth at both endpoints, full tilt only near data time.
@@ -69,12 +112,12 @@ def dbeta_dt(t):
 
 
 # # Qudratic ramp: smooth at noise, linear near data time.
-# def beta_fn(t):
-#     return (1 - t) ** 2
+def beta_fn(t):
+    return (1 - t) ** 2
 
 
-# def dbeta_dt(t):
-#     return -2 * (1 - t)
+def dbeta_dt(t):
+    return -2 * (1 - t)
 
 # # Linear ramp: smooth at noise, linear near data time.
 # def beta_fn(t):
@@ -104,7 +147,7 @@ fig_beta.savefig(OUT_DIR / "karras_beta_schedule.png", dpi=120, bbox_inches="tig
 plt_show()
 
 
-N_DENOISE_STEPS_SWEEP = [1, 5, 25]  # ODE substeps from current t down to T_DATA, swept
+N_DENOISE_STEPS_SWEEP = [1, 25, 50, 100]  # ODE substeps from current t down to T_DATA, swept
 
 
 def denoise(x_t, t, score_fn, sigma_fn, n_denoise_steps):

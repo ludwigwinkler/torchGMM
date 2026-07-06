@@ -4,7 +4,7 @@ from conftest import get_local_device
 
 from torchGMM.gmm import GMM
 from torchGMM.sampling import forward_sampling, reverse_sampling
-from torchGMM.schedule import BetaSchedule, LinearSchedule
+from torchGMM.schedule import BetaSchedule, KarrasSchedule, LinearSchedule
 
 torch.set_printoptions(sci_mode=False)
 
@@ -34,6 +34,27 @@ def _histogram_setup():
     x_flat = x_grid.squeeze()
     bin_edges = torch.cat([(x_flat[0] - dx / 2).unsqueeze(0), x_flat + dx / 2])
     return x_grid, bin_edges
+
+
+def _karras_schedule():
+    """Numerically stable Karras schedule for histogram-based marginal tests."""
+    return KarrasSchedule(sigma_min=0.01, sigma_max=1.0, rho=7.0, sigma_data=1.0)
+
+
+def _wasserstein1(samples, ground_truth_gmm, t, x_grid, bin_edges, batch_index=0):
+    """Grid-based 1D W1 between empirical samples and `ground_truth_gmm.log_prob(x_grid, t)`."""
+    target = ground_truth_gmm.log_prob(x_grid, t=t).exp()
+    if target.dim() > 1:
+        target = target[:, batch_index]
+    else:
+        target = target.squeeze(-1)
+    hist, _ = torch.histogram(samples, bins=bin_edges, density=True)
+    dx = bin_edges[1] - bin_edges[0]
+    hist_cdf = torch.cumsum(hist, dim=0) * dx
+    target_cdf = torch.cumsum(target, dim=0) * dx
+    hist_cdf = hist_cdf / hist_cdf[-1]
+    target_cdf = target_cdf / target_cdf[-1]
+    return (hist_cdf - target_cdf).abs().sum() * dx
 
 
 class TestForwardSampling:
@@ -66,7 +87,6 @@ class TestForwardSampling:
         for t_idx in range(n_steps)[::10]:
             t_ = t[t_idx]
             target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)  # [nsteps]
-            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
             import matplotlib.pyplot as plt
 
             # plt.plot(x_grid[:, 0, 0], target, label="Target")
@@ -77,8 +97,48 @@ class TestForwardSampling:
             # plt.legend()
             # plt.ylim(0, 1)
             # plt.show()
-            assert (hist - target).abs().max() < 0.05, (
-                f"{schedule_cls.__name__} forward ODE @ t={t_:.3f}: max deviation {(hist - target).abs().max():.3f}"
+            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
+            hist_dev = (hist - target).abs().max().item()
+            w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            assert hist_dev < 0.05, (
+                f"{schedule_cls.__name__} forward ODE @ t={t_:.3f}: "
+                f"max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+            )
+            assert w1 < 0.08, (
+                f"{schedule_cls.__name__} forward ODE @ t={t_:.3f}: "
+                f"W1 {w1:.3f}, max histogram deviation {hist_dev:.3f}"
+            )
+
+    def test_forward_ode_marginals_karras(self):
+        """Karras probability-flow ODE keeps the trajectory on the exact GMM marginals."""
+        torch.manual_seed(1)
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        schedule = _karras_schedule()
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        n_samples, n_steps = 10_000, 200
+        t_start, t_end = 0.01, 0.99
+        x = gmm.sample(shape=n_samples, t=t_start)  # [N, B=1, D=1]
+        t = torch.linspace(t_start, t_end, n_steps)
+        trajectory = forward_sampling(gmm.velocity, None, x, t)  # [T, N, B=1, D=1]
+
+        assert trajectory.shape == (n_steps, n_samples, 1, 1)
+
+        x_grid, bin_edges = _histogram_setup()
+        for t_idx in range(n_steps)[::10]:
+            t_ = t[t_idx]
+            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
+            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
+            hist_dev = (hist - target).abs().max().item()
+            w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            assert hist_dev < 0.05, (
+                f"KarrasSchedule forward ODE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+            )
+            assert w1 < 0.08, (
+                f"KarrasSchedule forward ODE @ t={t_:.3f}: W1 {w1:.3f}, "
+                f"max histogram deviation {hist_dev:.3f}"
             )
 
     @pytest.mark.slow
@@ -127,13 +187,52 @@ class TestForwardSampling:
             t_ = t[t_idx]
             target_dist = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)  # [51, 2]
             for dim in range(gmm.dim):
-                trajectory_dim = trajectory[t_idx, :, dim, 0].unsqueeze(-2)
-                hist, _ = torch.histogram(trajectory_dim, bins=bin_edges, density=True)
-                assert target_dist.shape[:1] == hist.shape
-                assert (hist - target_dist[:, dim]).abs().max() < 0.05, (
+                assert target_dist.shape[:1] == x_grid[:, dim, 0].shape
+                target = target_dist[:, dim]
+                hist, _ = torch.histogram(trajectory[t_idx, :, dim, 0], bins=bin_edges, density=True)
+                hist_dev = (hist - target).abs().max().item()
+                w1 = _wasserstein1(trajectory[t_idx, :, dim, 0], gmm, t_, x_grid, bin_edges, batch_index=dim)
+                assert hist_dev < 0.05, (
                     f"{schedule_cls.__name__} forward SDE gamma={gamma} @ t={t_:.3f} dim={dim}: "
-                    f"max deviation {(hist - target_dist[:, dim]).abs().max():.3f}"
+                    f"max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
                 )
+                assert w1 < 0.08, (
+                    f"{schedule_cls.__name__} forward SDE gamma={gamma} @ t={t_:.3f} dim={dim}: "
+                    f"W1 {w1:.3f}, max histogram deviation {hist_dev:.3f}"
+                )
+
+    @pytest.mark.slow
+    def test_forward_sde_marginals_karras(self):
+        """Karras forward VE SDE keeps the trajectory on the exact GMM marginals."""
+        torch.manual_seed(0)
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        schedule = _karras_schedule()
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        n_samples, n_steps = 50_000, 400
+        t = torch.linspace(self.t_eps, 1 - self.t_eps, n_steps)
+        x = gmm.sample(shape=n_samples, t=self.t_eps)  # [N, B=1, D=1]
+        trajectory = forward_sampling(schedule.forward_drift, schedule.diffusion_coeff, x, t)
+
+        assert trajectory.shape == (len(t), n_samples, 1, 1)
+        assert torch.allclose(trajectory[0], x, atol=1e-5)
+
+        x_grid, bin_edges = _histogram_setup()
+        for t_idx in range(t.numel())[::10]:
+            t_ = t[t_idx]
+            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
+            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
+            hist_dev = (hist - target).abs().max().item()
+            w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            assert hist_dev < 0.05, (
+                f"KarrasSchedule forward SDE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+            )
+            assert w1 < 0.08, (
+                f"KarrasSchedule forward SDE @ t={t_:.3f}: W1 {w1:.3f}, "
+                f"max histogram deviation {hist_dev:.3f}"
+            )
 
 
 class TestReverseSampling:
@@ -191,8 +290,48 @@ class TestReverseSampling:
             t_ = t[t_idx]
             target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)  # [51]
             hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
-            assert (hist - target).abs().max() < 0.05, (
-                f"{schedule_cls.__name__} ODE @ t={t_:.3f}: max deviation {(hist - target).abs().max():.3f}"
+            hist_dev = (hist - target).abs().max().item()
+            w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            assert hist_dev < 0.05, (
+                f"{schedule_cls.__name__} ODE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+            )
+            assert w1 < 0.08, (
+                f"{schedule_cls.__name__} ODE @ t={t_:.3f}: W1 {w1:.3f}, "
+                f"max histogram deviation {hist_dev:.3f}"
+            )
+
+    def test_reverse_ode_marginals_karras(self):
+        """Karras probability-flow ODE matches analytical GMM marginals during reverse integration."""
+        torch.manual_seed(0)
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        schedule = _karras_schedule()
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        n_samples, n_steps = 10_000, 200
+        x = gmm.sample(shape=n_samples, t=1 - self.eps)  # [N, B=1, D=1]
+        t = torch.linspace(1 - self.eps, self.eps, n_steps)
+        trajectory = reverse_sampling(gmm.velocity, None, x, t)  # [T, N, B=1, D=1]
+
+        assert trajectory.shape == (n_steps, n_samples, 1, 1)
+
+        trajectory2 = reverse_sampling(gmm.velocity, None, x, t)
+        torch.testing.assert_close(trajectory, trajectory2)
+
+        x_grid, bin_edges = _histogram_setup()
+        for t_idx in range(n_steps)[::5]:
+            t_ = t[t_idx]
+            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
+            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
+            hist_dev = (hist - target).abs().max().item()
+            w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            assert hist_dev < 0.05, (
+                f"KarrasSchedule reverse ODE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+            )
+            assert w1 < 0.08, (
+                f"KarrasSchedule reverse ODE @ t={t_:.3f}: W1 {w1:.3f}, "
+                f"max histogram deviation {hist_dev:.3f}"
             )
 
     @pytest.mark.slow
@@ -245,8 +384,6 @@ class TestReverseSampling:
             t_ = t[t_idx]
             target_dist = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
             for dim in range(gmm.dim):
-                trajectory_dim = trajectory[t_idx, :, dim, 0].unsqueeze(-2)
-                hist, _ = torch.histogram(trajectory_dim, bins=bin_edges, density=True)
                 import matplotlib.pyplot as plt
 
                 # plt.plot(x_grid[:, dim, 0], target_dist[:, dim], label="Target")
@@ -255,8 +392,57 @@ class TestReverseSampling:
                 # plt.legend()
                 # plt.ylim(0, 1)
                 # plt.show()
-                assert target_dist.shape[:1] == hist.shape
-                assert (hist - target_dist[:, dim]).abs().max() < 0.05
+                assert target_dist.shape[:1] == x_grid[:, dim, 0].shape
+                target = target_dist[:, dim]
+                hist, _ = torch.histogram(trajectory[t_idx, :, dim, 0], bins=bin_edges, density=True)
+                hist_dev = (hist - target).abs().max().item()
+                w1 = _wasserstein1(trajectory[t_idx, :, dim, 0], gmm, t_, x_grid, bin_edges, batch_index=dim)
+                assert hist_dev < 0.05, (
+                    f"{schedule_cls.__name__} reverse SDE gamma={gamma} @ t={t_:.3f} dim={dim}: "
+                    f"max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+                )
+                assert w1 < 0.08, (
+                    f"{schedule_cls.__name__} reverse SDE gamma={gamma} @ t={t_:.3f} dim={dim}: "
+                    f"W1 {w1:.3f}, max histogram deviation {hist_dev:.3f}"
+                )
+
+    @pytest.mark.slow
+    def test_reverse_sde_marginals_karras(self):
+        """Karras Anderson reverse SDE matches analytical GMM marginals during reverse integration."""
+        torch.manual_seed(0)
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        schedule = _karras_schedule()
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        n_samples, n_steps = 50_000, 400
+        x = gmm.sample(shape=n_samples, t=1 - self.eps)  # [N, B=1, D=1]
+        t = torch.linspace(1 - self.eps, self.eps, n_steps)
+
+        def drift_fn(x_, t_):
+            g = schedule.diffusion_coeff(t_)
+            return -(g**2) * gmm.score(x_, t_)
+
+        trajectory = reverse_sampling(drift_fn, schedule.diffusion_coeff, x, t)
+
+        assert trajectory.shape == (n_steps, n_samples, 1, 1)
+        assert torch.allclose(trajectory[0], x, atol=1e-5)
+
+        x_grid, bin_edges = _histogram_setup()
+        for t_idx in range(t.numel())[::10]:
+            t_ = t[t_idx]
+            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
+            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
+            hist_dev = (hist - target).abs().max().item()
+            w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            assert hist_dev < 0.05, (
+                f"KarrasSchedule reverse SDE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+            )
+            assert w1 < 0.08, (
+                f"KarrasSchedule reverse SDE @ t={t_:.3f}: W1 {w1:.3f}, "
+                f"max histogram deviation {hist_dev:.3f}"
+            )
 
     def test_t_must_be_decreasing(self):
         x = torch.randn(10, 2)
