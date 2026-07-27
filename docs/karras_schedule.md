@@ -1,8 +1,10 @@
 # Karras Noise Schedule and Its Implied Forward Process
 
-This note describes the `KarrasSchedule` used in `torchGMM`. It only covers the
-noise schedule and the Euler-Maruyama SDE it implies. It deliberately ignores the
-EDM/Karras denoiser parameterization, preconditioning, and sampler corrections.
+This note describes the `KarrasSchedule` used in `torchGMM`: the noise schedule,
+the forward and reverse SDEs it implies, and how it composes with the
+Feynman-Kac-Corrector steering of `docs/fkc_steering.md`. It deliberately ignores
+the EDM/Karras denoiser parameterization, preconditioning, and sampler
+corrections.
 
 ## Schedule definition
 
@@ -18,20 +20,16 @@ $$\bar\sigma(t)
 + t\left(\sigma_{\max}^{1/\rho}-\sigma_{\min}^{1/\rho}\right)
 \right)^\rho.$$
 
-Equivalently, if
+Equivalently, with
 
 $$u(t)=\sigma_{\min}^{1/\rho}
-+ t\left(\sigma_{\max}^{1/\rho}-\sigma_{\min}^{1/\rho}\right),$$
-
-then
-
-$$\bar\sigma(t)=\sigma_{\mathrm{data}}u(t)^\rho.$$
++ t\left(\sigma_{\max}^{1/\rho}-\sigma_{\min}^{1/\rho}\right),
+\qquad
+\bar\sigma(t)=\sigma_{\mathrm{data}}\,u(t)^\rho.$$
 
 So time is linear in $\bar\sigma^{1/\rho}$, not in $\bar\sigma$. The parameter
-$\rho$ controls how the grid concentrates. For $\rho=1$, the schedule is linear
-in $\bar\sigma$; for the common EDM/AF3 value $\rho=7$, the schedule spends more
-resolution near low noise.
-
+$\rho$ controls how the grid concentrates: $\rho=1$ is linear in $\bar\sigma$,
+while the common EDM/AF3 value $\rho=7$ spends more resolution near low noise.
 The derivative used by the SDE is
 
 $$\dot{\bar\sigma}(t)
@@ -43,170 +41,112 @@ $$\dot{\bar\sigma}(t)
 For a clean data distribution $q_{\mathrm{data}}$, the schedule defines the
 Gaussian-convolved marginal
 
-$$q_t = q_{\mathrm{data}} * \mathcal{N}\!\left(0,\bar\sigma(t)^2I\right).$$
+$$q_t = q_{\mathrm{data}} * \mathcal{N}\!\left(0,\bar\sigma(t)^2I\right),$$
 
-For a GMM, this stays exact:
+which for a GMM stays exact and in-family:
 
 $$q_t(x)=\sum_k \pi_k\,
 \mathcal{N}\!\left(x;\mu_k,\Sigma_k+\bar\sigma(t)^2I\right).$$
 
-The important endpoint detail is that `KarrasSchedule` has
-$\bar\sigma(0)=\sigma_{\mathrm{data}}\sigma_{\min}$, not zero. Thus `t=0` is a
-small-noise endpoint, not mathematically exact clean data unless
-$\sigma_{\min}=0$. In practice $\sigma_{\min}$ is chosen tiny enough that this is
-treated as the data endpoint.
+Note that $\bar\sigma(0)=\sigma_{\mathrm{data}}\sigma_{\min}>0$, so $t=0$ is a
+small-noise endpoint rather than exactly clean data. With the default
+$\sigma_{\min}=4\times10^{-4}$ this is a variance of order $10^{-7}\sigma_{\mathrm{data}}^2$
+and is treated as the data endpoint throughout; the exact-endpoint variant is
+noted once in the conditional section below.
 
 ## Implied forward SDE
 
-Start from the desired noising path itself. Couple all times with the same clean
-sample $X_{\mathrm{data}}$ and the same Gaussian noise $\epsilon$:
+Start from the noising path itself. Couple all times with the same clean sample
+$X_{\mathrm{data}}\sim q_{\mathrm{data}}$ and the same Gaussian noise $\epsilon$:
 
 $$X_t = X_{\mathrm{data}} + \bar\sigma(t)\epsilon,
-\qquad \epsilon\sim\mathcal{N}(0,I),$$
+\qquad \epsilon\sim\mathcal{N}(0,I).$$
 
-where $X_{\mathrm{data}}\sim q_{\mathrm{data}}$. At each fixed time $t$, this
-implies the marginal density
-
-$$q_t = q_{\mathrm{data}} * \mathcal{N}\!\left(0,\bar\sigma(t)^2I\right).$$
-
-Now take the time derivative of the marginal variance. The clean-data variance
-does not change with $t$, and the only time-dependent part is the added noise:
+At each fixed $t$ this reproduces the marginal $q_t$ above. Differentiating the
+marginal variance in time, the clean-data part is constant, so
 
 $$\frac{d}{dt}\mathrm{Var}[X_t]
-= \frac{d}{dt}\mathrm{Var}\!\left[X_{\mathrm{data}}+\bar\sigma(t)\epsilon\right]
-= \frac{d}{dt}\mathrm{Var}\!\left[\bar\sigma(t)\epsilon\right].$$
-
-Since $\epsilon\sim\mathcal{N}(0,I)$,
-
-$$\mathrm{Var}\!\left[\bar\sigma(t)\epsilon\right]=\bar\sigma(t)^2I,$$
-
-so
-
-$$\frac{d}{dt}\mathrm{Var}[X_t]
+= \frac{d}{dt}\mathrm{Var}\!\left[\bar\sigma(t)\epsilon\right]
 =\frac{d}{dt}\bar\sigma(t)^2I
 =2\bar\sigma(t)\dot{\bar\sigma}(t)I.$$
 
-A driftless VE SDE,
-
-$$dX_t = g(t)\,dW_t,$$
-
-Brownian motion contributes covariance $g(t)^2I\,dt$ over an infinitesimal
-interval $dt$, so
-
-$$\frac{d}{dt}\mathrm{Var}(X_t)=g(t)^2I.$$
-
-Therefore, to make the SDE have the same marginal variance growth as the
-differentiated noising path, choose
+A driftless VE SDE $dX_t = g(t)\,dW_t$ accumulates covariance $g(t)^2I\,dt$ per
+infinitesimal interval, so $\frac{d}{dt}\mathrm{Var}(X_t)=g(t)^2I$. Matching the
+two variance growth rates gives
 
 $$g(t)^2=\frac{d}{dt}\bar\sigma(t)^2
-=2\bar\sigma(t)\dot{\bar\sigma}(t).$$
+=2\bar\sigma(t)\dot{\bar\sigma}(t),$$
 
-The final equality is just the chain rule. Thus $\bar\sigma(t)$ is the marginal
-noise standard deviation, while $g(t)$ is the instantaneous SDE diffusion
-coefficient; they are related by accumulated variance, not by equality.
+the last equality being the chain rule. This is what
+`KarrasSchedule.diffusion_coeff(t)` implements:
 
-The critical notation pitfall is:
+$$g(t)=\sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)},
+\qquad
+dX_t = \sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)}\,dW_t.$$
+
+### $\bar\sigma(t)^2$ is not $g(t)^2$
+
+This is the one notation trap worth stating explicitly.
 
 $$\bar\sigma(t)^2 \neq g(t)^2.$$
 
 $\bar\sigma(t)^2$ is the **marginal noise variance already accumulated** by time
-$t$. $g(t)^2$ is the **instantaneous variance injection rate** at time $t$. Its
-time derivative, $\frac{d}{dt}g(t)^2$, is the curvature of that injection rate and
-is not the quantity needed to match the marginal path. The correct direction is
+$t$; $g(t)^2$ is the **instantaneous variance injection rate** at time $t$. The
+correct chain is
 
 $$\bar\sigma(t)\;\longrightarrow\;\bar\sigma(t)^2
 \;\longrightarrow\;\frac{d}{dt}\bar\sigma(t)^2
 =2\bar\sigma(t)\dot{\bar\sigma}(t)
 \;\longrightarrow\;g(t)^2.$$
 
-Conversely, if we start from the instantaneous diffusion coefficient, the
-marginal noise variance is obtained by integration:
+Going the other way, the accumulated variance is recovered by integration, which
+is just a change of variables:
 
 $$\bar\sigma(t)^2-\bar\sigma(t_0)^2
-=\int_{t_0}^{t}g(s)^2\,ds.$$
-
-Using $g(s)^2=2\bar\sigma(s)\dot{\bar\sigma}(s)$, this is just a change of
-variables:
-
-$$\int_{t_0}^{t}g(s)^2\,ds
+=\int_{t_0}^{t}g(s)^2\,ds
 =\int_{t_0}^{t}2\bar\sigma(s)\dot{\bar\sigma}(s)\,ds
-=\int_{\bar\sigma(t_0)}^{\bar\sigma(t)}2\sigma\,d\sigma
-=\bar\sigma(t)^2-\bar\sigma(t_0)^2.$$
+=\int_{\bar\sigma(t_0)}^{\bar\sigma(t)}2\sigma\,d\sigma.$$
 
-So integrating $2\sigma\,d\sigma$ recovers the **marginal variance increment**,
-not a marginal value of $g(t)^2$. The quantity $g(t)^2$ is the derivative of that
-marginal variance with respect to time.
-
-This is exactly what `KarrasSchedule.diffusion_coeff(t)` implements:
-
-$$g(t)=\sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)}.$$
-
-Thus the implied forward SDE is
-
-$$dX_t = \sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)}\,dW_t.$$
-
-Its Fokker-Planck equation is
+The Fokker-Planck equation of the forward SDE,
 
 $$\partial_t q_t = \frac{1}{2}g(t)^2\Delta q_t
-= \frac{1}{2}\frac{d}{dt}\bar\sigma(t)^2\Delta q_t.$$
+= \frac{1}{2}\frac{d}{dt}\bar\sigma(t)^2\Delta q_t,$$
 
-This agrees with the heat-kernel identity for Gaussian convolution:
+is exactly the heat-kernel identity for Gaussian convolution, confirming the
+match.
 
-$$\partial_t\left(q_{\mathrm{data}} * \mathcal{N}(0,\bar\sigma(t)^2I)\right)
-= \frac{1}{2}\frac{d}{dt}\bar\sigma(t)^2
-\Delta\left(q_{\mathrm{data}} * \mathcal{N}(0,\bar\sigma(t)^2I)\right).$$
+## Forward Euler-Maruyama
 
-Strictly speaking, if the SDE starts at $X_0\sim q_0$, then
-$q_0=q_{\mathrm{data}} * \mathcal{N}(0,\bar\sigma(0)^2I)$. Starting from exactly
-clean data instead requires an initial noising step of variance
-$\bar\sigma(0)^2$ before integrating the SDE.
+In infinitesimal form, with `KarrasSchedule.forward_drift` returning zero,
 
-## Forward Euler-Maruyama in continuous notation
+$$dX_t = g(t)\,dW_t,\qquad dW_t \sim \mathcal{N}(0,dt\,I),\qquad dt>0,$$
 
-In infinitesimal form, the forward SDE is
-
-$$dX_t = g(t)\,dW_t,\qquad dW_t \sim \mathcal{N}(0,dt\,I),\qquad dt>0.$$
-
-There is no deterministic term because `KarrasSchedule.forward_drift` returns
-zero. The conditional covariance of the infinitesimal increment is
-
-$$\mathrm{Var}[dX_t\mid X_t]=g(t)^2dt\,I.$$
-
-Equivalently, the Euler-Maruyama local update over a small positive time
-increment $dt$ is
+so $\mathrm{Var}[dX_t\mid X_t]=g(t)^2dt\,I$ and the local update is
 
 $$X_{t+dt}=X_t+g(t)\sqrt{dt}\,\epsilon,\qquad
 \epsilon\sim\mathcal{N}(0,I).$$
 
-The exact forward transition variance over the same interval is
-
-$$\bar\sigma(t+dt)^2-\bar\sigma(t)^2
-=\int_t^{t+dt}g(s)^2\,ds.$$
-
-Euler-Maruyama uses the local approximation
-
-$$\int_t^{t+dt}g(s)^2\,ds \approx g(t)^2dt.$$
-
-For a finite interval where this approximation is too coarse, an exact
-forward-noising transition can instead sample
+This is the local approximation
+$\int_t^{t+dt}g(s)^2\,ds \approx g(t)^2dt$ of the exact transition variance
+$\bar\sigma(t+dt)^2-\bar\sigma(t)^2$. When only forward noising is needed and the
+interval is too coarse for that approximation, the exact transition
 
 $$X_{t+dt}=X_t
-+\sqrt{\bar\sigma(t+dt)^2-\bar\sigma(t)^2}\,\epsilon,$$
++\sqrt{\bar\sigma(t+dt)^2-\bar\sigma(t)^2}\,\epsilon$$
 
-which is available because the Karras marginal variance is known in closed form.
+is available in closed form.
 
-## Reverse SDE under the same schedule
+## Reverse SDE
 
-Let
-
-$$s_t(x)=\nabla_x\log q_t(x).$$
-
-Since the forward drift is zero, the Anderson reverse-time SDE is
+Let $s_t(x)=\nabla_x\log q_t(x)$. Since the forward drift is zero, the Anderson
+reverse-time SDE is
 
 $$dX_t = -g(t)^2s_t(X_t)\,dt + g(t)\,d\bar W_t,$$
 
-when integrated with decreasing time, so $dt<0$. In the repository's
-`reverse_sampling` convention, the drift callable is
+integrated along a decreasing time grid, so $dt<0$. Because $dt<0$, the
+deterministic part moves in the denoising direction $+g(t)^2s_t(X_t)|dt|$. In the
+repository's `reverse_sampling` convention the drift callable is the signed
+forward-time version:
 
 ```python
 def reverse_drift(x, t):
@@ -214,125 +154,83 @@ def reverse_drift(x, t):
     return -(g**2) * gmm.score(x, t)
 ```
 
-and the infinitesimal Euler-Maruyama update is
+and the Euler-Maruyama update is
 
 $$X_{t+dt}
 = X_t - g(t)^2s_t(X_t)\,dt
-+ g(t)\sqrt{|dt|}\epsilon,\qquad dt<0.$$
++ g(t)\sqrt{|dt|}\,\epsilon,\qquad dt<0.$$
 
-Because $dt<0$, the deterministic part moves in the denoising direction
-$+g(t)^2s_t(X_t)|dt|$.
+## Conditional reverse SDE for a single clean point
 
-## Conditional reverse SDE in terms of $\bar\sigma(t)$, $x_T$, and $x_0$
+Take a single clean point $x_0$ and the idealized clean endpoint
+$\bar\sigma(0)=0$. The VE marginal and its score are
 
-For a single clean point $x_0$, first assume the ideal clean-endpoint convention
-$\bar\sigma(0)=0$. Then the VE marginal is
+$$q_t(x\mid x_0)=\mathcal{N}\!\left(x;x_0,\bar\sigma(t)^2I\right),
+\qquad
+s_t(x\mid x_0)=-\frac{x-x_0}{\bar\sigma(t)^2}.$$
 
-$$q_t(x\mid x_0)=\mathcal{N}\!\left(x;x_0,\bar\sigma(t)^2I\right),$$
-
-so the conditional score is
-
-$$s_t(x\mid x_0)=\nabla_x\log q_t(x\mid x_0)
-=-\frac{x-x_0}{\bar\sigma(t)^2}.$$
-
-Plugging this score into the reverse SDE gives the clean-point conditional
-reverse process
-
-$$dX_t
-= g(t)^2 \frac{\bigl(X_t-x_0\bigr)}{\bar\sigma(t)^2} \,dt
-+ g(t)\,d\bar W_t,\qquad dt<0.$$
-
-Since $g(t)^2=2\bar\sigma(t)\dot{\bar\sigma}(t)$, this can be written purely in
-terms of the schedule as
+Substituting into the reverse SDE and using
+$g(t)^2=2\bar\sigma(t)\dot{\bar\sigma}(t)$:
 
 $$
 \begin{align}
 dX_t
-&= g(t)^2 \frac{\bigl(X_t-x_0\bigr)}{\bar\sigma(t)^2} \,dt
-+ g(t)\,d\bar W_t,\qquad dt<0 \\
-&= 2\bar\sigma(t)\dot{\bar\sigma}(t) \frac{\bigl(X_t-x_0\bigr)}{\bar\sigma(t)^2} \,dt
-+ g(t)\,d\bar W_t,\qquad dt<0 \\
-&= 2\dot{\bar\sigma}(t)
-\frac{X_t-x_0}{\bar\sigma(t)}\,dt
-+ \sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)}\,d\bar W_t,\qquad dt<0
+&= -g(t)^2 s_t(X_t\mid x_0)\,dt + g(t)\,d\bar W_t \\
+&= g(t)^2\frac{X_t-x_0}{\bar\sigma(t)^2}\,dt + g(t)\,d\bar W_t \\
+&= 2\dot{\bar\sigma}(t)\frac{X_t-x_0}{\bar\sigma(t)}\,dt
++ \sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)}\,d\bar W_t,
+\qquad dt<0.
 \end{align}$$
 
-If the reverse chain is initialized at a terminal noisy sample $X_T=x_T$, then
-this SDE is run backward from
-
-$$X_T=x_T.$$
-
-The deterministic part moves toward $x_0$ because $dt<0$:
+The chain is initialized at a terminal noisy sample $X_T=x_T$. Since $dt<0$, the
+deterministic part contracts toward $x_0$:
 
 $$2\dot{\bar\sigma}(t)\frac{X_t-x_0}{\bar\sigma(t)}\,dt
-= -2\dot{\bar\sigma}(t)\frac{X_t-x_0}{\bar\sigma(t)}|dt|.$$
+= -2\dot{\bar\sigma}(t)\frac{X_t-x_0}{\bar\sigma(t)}\,|dt|.$$
 
-If one also wants the process to be **pinned** to both endpoints,
-$X_0=x_0$ and $X_T=x_T$, that is a diffusion bridge, not the ordinary reverse
-SDE above. The Gaussian bridge marginal at an intermediate time is
+**Exact clean endpoint.** For the literal schedule, $\bar\sigma(0)>0$, and the
+conditional formulas are made exact by replacing $\bar\sigma(t)^2$ with the
+variance clock $V(t)=\bar\sigma(t)^2-\bar\sigma(0)^2$, giving
+$s_t(x\mid x_0)=-(x-x_0)/V(t)$ and drift $\frac{g(t)^2}{V(t)}(X_t-x_0)$. At the
+default $\sigma_{\min}$ the difference is negligible, and the rest of this note
+uses $\bar\sigma(t)^2$.
+
+**Not a bridge.** Pinning both endpoints, $X_0=x_0$ and $X_T=x_T$, is a different
+conditioning problem — a diffusion bridge with marginal
 
 $$X_t\mid x_0,x_T
 \sim \mathcal{N}\!\left(
 x_0+\frac{\bar\sigma(t)^2}{\bar\sigma(T)^2}(x_T-x_0),
 \;\bar\sigma(t)^2\left(1-\frac{\bar\sigma(t)^2}{\bar\sigma(T)^2}\right)I
-\right).$$
+\right),$$
 
-This endpoint-conditioned bridge is useful conceptually, but it is a different
-conditioning problem from the standard score-based reverse SDE, which conditions
-on the current noisy state distribution and is initialized at $x_T$.
-
-For the literal Karras schedule in this repository, $\bar\sigma(0)>0$. To keep
-the clean endpoint exact, replace every occurrence of $\bar\sigma(t)^2$ in the
-conditional formulas above by the variance clock
-
-$$V(t)=\bar\sigma(t)^2-\bar\sigma(0)^2.$$
-
-For example,
-
-$$q_t(x\mid x_0)=\mathcal{N}\!\left(x;x_0,V(t)I\right),\qquad
-s_t(x\mid x_0)=-\frac{x-x_0}{V(t)},$$
-
-and the clean-point conditional reverse SDE becomes
-
-$$dX_t
-= \frac{g(t)^2}{V(t)}\bigl(X_t-x_0\bigr)\,dt
-+ g(t)\,d\bar W_t,\qquad dt<0.$$
+whereas the reverse SDE above conditions only on the current noisy state and is
+initialized at $x_T$.
 
 ## Practical consequence
 
-For large $\sigma_{\max} = 160$ and $\rho=7$,
+For $\sigma_{\max}=160$ and $\rho=7$, $g(t)^2=2\bar\sigma(t)\dot{\bar\sigma}(t)$
+becomes very large near $t=1$. Euler-Maruyama is therefore sensitive to the
+high-noise endpoint: stable runs want a sufficiently fine grid, a start time
+slightly below $1$, or — when only forward noising is needed — the
+exact-in-variance transition above.
 
-$$g(t)^2=2\bar\sigma(t)\dot{\bar\sigma}(t)$$
+## FKC steering under the Karras schedule
 
-can become very large near $t=1$. Euler-Maruyama simulations are therefore
-sensitive to the high-noise endpoint: stable runs usually need a sufficiently
-fine grid, or a start time slightly below $1$, or an exact-in-variance forward
-transition when only forward noising is needed.
+Combining the VE schedule with the steering equations of `docs/fkc_steering.md`,
+the reward-tilted marginal is
 
-## Matching FKC Steering Drift
+$$p_t(x)\propto q_t(x)\exp\bigl(\beta(t)\,r(x,t)\bigr),$$
 
-Now combine the Karras VE schedule with the FKC steering equations from
-`docs/fkc_steering.md`. The reward-tilted marginal is
-
-$$p_t(x)\propto q_t(x)\exp(\beta(t)r(x,t)).$$
-
-For Karras,
+and for Karras
 
 $$f_t(x)\equiv 0,\qquad
 g(t)^2=2\bar\sigma(t)\dot{\bar\sigma}(t),\qquad
 s_t(x)=\nabla_x\log q_t(x).$$
 
-The unsteered reverse-time dynamics, written in a positive reverse-time
-increment $d\tau=-dt>0$, are
-
-$$dX_t = g(t)^2s_t(X_t)\,d\tau + g(t)\,dW_\tau.$$
-
-FKC adds the drift
-
-$$\beta(t)\frac{g(t)^2}{2}\nabla r(X_t,t)
-= \beta(t)\bar\sigma(t)\dot{\bar\sigma}(t)\nabla r(X_t,t),$$
-
-so the Karras FKC steered reverse SDE is
+Writing the reverse-time increment as $d\tau=-dt>0$, the unsteered dynamics are
+$dX_t = g(t)^2s_t(X_t)\,d\tau + g(t)\,dW_\tau$, and FKC adds the drift
+$\beta(t)\frac{g(t)^2}{2}\nabla r$. The steered reverse SDE is therefore
 
 $$
 \begin{align}
@@ -344,13 +242,13 @@ g(t)^2s_t(X_t)
 + g(t)\,dW_\tau \\
 &= 2\bar\sigma(t)\dot{\bar\sigma}(t)
 \left[
-s_t(X_t)+\frac{\beta(t)}{2}\nabla r(X_t,t) 
+s_t(X_t)+\frac{\beta(t)}{2}\nabla r(X_t,t)
 \right]d\tau
-+ \sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)}\,dW_\tau
++ \sqrt{2\bar\sigma(t)\dot{\bar\sigma}(t)}\,dW_\tau,
 \end{align}
 $$
 
-The corresponding FKC log-weight increment is
+with log-weight increment
 
 $$
 \begin{align}
@@ -367,23 +265,20 @@ dw_t
 -\beta(t)\partial_t r(X_t,t)
 + \beta(t)\bar\sigma(t)\dot{\bar\sigma}(t)
 \left\langle\nabla r(X_t,t),s_t(X_t)\right\rangle
-\right]d\tau
-\end{align}$$
+\right]d\tau.
+\end{align}
+$$
 
-The repository's samplers use a decreasing forward-time grid directly, so
-$dt<0$ and $d\tau=|dt|=-dt$. In that convention, the drift callable passed to
-`steered_reverse_sampling` is the signed-forward-time version
+The samplers use a decreasing forward-time grid, so $dt<0$ and $d\tau=|dt|$. The
+callables passed to `steered_reverse_sampling` are
 
 ```python
 def guided_drift(x, t):
     g = schedule.diffusion_coeff(t)
     score = gmm.score(x, t)
     return -(g**2) * score - beta(t) * (g**2 / 2) * grad_r(x, t)
-```
 
-and the weight update returns the positive reverse-time increment
 
-```python
 def weight_update(x, t, dt):
     g = schedule.diffusion_coeff(t)
     score = gmm.score(x, t)
@@ -395,34 +290,71 @@ def weight_update(x, t, dt):
     return integrand * dt.abs()
 ```
 
-If the reward has no explicit time dependence, the `partial_t_r` term is zero.
+If the reward has no explicit time dependence, `partial_t_r` is zero.
 
-### Matching $\beta(t)$ to balance score and reward gradients
+## Choosing the tilt schedule $\beta(t)$
 
-Consider the drift
+Write $\beta$ as a quotient of an **annealing schedule** and a **variance-matching
+schedule**:
 
-$$
-\begin{align}
-\text{drift}: 
-&\quad 2\bar\sigma(t)\dot{\bar\sigma}(t)
+$$\beta(t)=\frac{\beta^{\mathrm{nom}}(t)}{\beta^{\mathrm{denom}}(t)},\qquad
+\beta^{\mathrm{nom}}(t)=(1-t)^p,\qquad
+\beta^{\mathrm{denom}}(t)=1+\bar\sigma(t)^2.$$
+
+**Numerator — annealing.** $\beta^{\mathrm{nom}}(1)=0$, $\beta^{\mathrm{nom}}(0)=1$: the tilt is off at the noise end
+and full at the data end. This is what carries correctness. The terminal target
+is $p_0\propto q_0\exp(\beta(0)r)$, so sampling $q_0e^{r}$ requires $\beta(0)=1$,
+and $\beta(1)=0$ makes $p_1=q_1$ so particles can be initialized from the
+unsteered prior. Nothing in between matters for the target: the $-\dot\beta r$
+term in $dw_t$ pays for the path, telescoping to $r(\beta(0)-\beta(1))$ when $r$
+is path-constant. The shape of $\beta^{\mathrm{nom}}$ on $(0,1)$ buys ESS, not
+correctness. The exponent $p>1$ is one such choice: for $p\le1$,
+$\dot\beta^{\mathrm{nom}}\sim(1-t)^{p-1}$ diverges
+at $t\to1$ and the $-\dot\beta r$ term spikes exactly where $r$ on a denoised
+estimate is least informative.
+
+**Denominator — variance matching.** The score scale is $1/\bar\sigma(t)^2$, so
+balancing the reward gradient against it wants $\beta\propto1/\bar\sigma(t)^2$;
+the $1+$ is the floor that keeps $\beta^{\mathrm{denom}}$ from collapsing as
+$\bar\sigma(t)\to\bar\sigma(0)\approx0$. With an attracting quadratic reward
+$r(x)=-(x-b)^2$ and $s_t(x)=-(x-x_0)/\bar\sigma(t)^2$, the drift bracket is
+
+$$2\bar\sigma(t)\dot{\bar\sigma}(t)
 \left[
-s_t(X_t)+\frac{\beta(t)}{2}\nabla r(X_t,t) 
-\right]d\tau \\ 
-&= 2\bar\sigma(t)\dot{\bar\sigma}(t)
-\left[
-\frac{(X_t - x0)}{\bar\sigma(t)^2}+\frac{\beta(t)}{2}\nabla r(X_t,t) 
-\right]d \tau
-\end{align}$$
+-\frac{X_t-x_0}{\bar\sigma(t)^2}
+-\beta(t)\left(X_t-b\right)
+\right]d\tau,$$
 
-Now imagine that $r(X_t, t)$ is a simple quadratic reward, such that we have $r(X_t, t)= (X_t - b)^2$ for some target $b$. Then $\nabla r(X_t, t) = 2(X_t - b)$. The drift becomes
-$$
-\begin{align}
-\text{drift}:
-&= 2\bar\sigma(t)\dot{\bar\sigma}(t)
-\left[
-\frac{(X_t - x0)}{\bar\sigma(t)^2} + \beta(t)(X_t - b) 
-\right]d \tau
-\end{align}$$
+both terms restoring, with dimensionless ratio
 
-We can then choose $\beta(t)$ such that the two terms balance each other, i.e., we want
-$$\beta(t) = \frac{1}{\bar\sigma(t)^2}$$
+$$\frac{\text{reward drift}}{\text{score drift}}
+=\beta(t)\,\bar\sigma(t)^2\,
+\frac{\lVert X_t-b\rVert}{\lVert X_t-x_0\rVert}
+= \underbrace{\beta^{\mathrm{nom}}(t)}_{\text{annealing}} \ \ \underbrace{\frac{\bar\sigma(t)^2}{1+\bar\sigma(t)^2}\,
+\frac{\lVert X_t-b\rVert}{\lVert X_t-x_0\rVert}}_{\text{balanced}}.$$
+
+The factor $\bar\sigma^2/(1+\bar\sigma^2)$ saturates to $1$ at high noise and
+decays like $\bar\sigma^2$ at low noise, bounding the ratio by
+$\beta^{\mathrm{nom}}(t)\le1$ everywhere. Drop the denominator and the ratio is
+$\propto \beta^{\mathrm{nom}}(t)\bar\sigma(t)^2$,
+which at $\sigma_{\max}=160$ is $O(10^4)$ over most of the grid — the reward
+gradient overruns the score. The floor also settles the endpoint for free:
+$\beta^{\mathrm{denom}}(0)=1+\bar\sigma(0)^2\to1$, so
+$\beta(0)=\beta^{\mathrm{nom}}(0)=1$ (exact to $O(10^{-5})$ at the
+default $\sigma_{\min}$; divide by $\beta^{\mathrm{denom}}(0)$ if
+$\bar\sigma(0)$ is not small).
+
+**Derivative.** By logarithmic differentiation with
+$\frac{d}{dt}\bar\sigma(t)^2=g(t)^2$, the `dbeta_dt` callable is
+
+$$\dot\beta(t)
+=-\beta(t)\left[
+\frac{p}{1-t}+\frac{g(t)^2}{1+\bar\sigma(t)^2}
+\right],$$
+
+finite at both ends: $p/(1-t)\to p$ at $t=0$, while at $t=1$ the prefactor
+$\beta\sim(1-t)^p$ kills the pole for $p>1$ and $g^2/(1+\bar\sigma^2)$ stays
+bounded because the denominator grows with the same variance that drives $g^2$.
+
+The notebooks currently implement the numerator only — $(1-t)^2$ (active),
+$\cos^2(\tfrac{\pi}{2}t)$, $1-t$ — without the variance denominator.

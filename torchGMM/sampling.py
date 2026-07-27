@@ -102,6 +102,10 @@ def _systematic_resample(log_w: torch.Tensor) -> torch.Tensor:
     return torch.searchsorted(cdf, u).clamp(max=N - 1)
 
 
+def _normalized_weights(log_w: torch.Tensor) -> torch.Tensor:
+    return torch.softmax(log_w, dim=0)
+
+
 @jaxtyped(typechecker=beartype)
 def steered_reverse_sampling(
     drift: Callable,
@@ -110,7 +114,7 @@ def steered_reverse_sampling(
     x: Float[Tensor, "N *rest D"],
     t: Float[Tensor, " T"],
     ess_threshold: float | int = 0.5,
-) -> tuple[Float[Tensor, "T N *rest D"], list[float]]:
+) -> tuple[Float[Tensor, "T N *rest D"], list[float], Float[Tensor, "T N"]]:
     """Reverse SDE/ODE sampling with SMC particle correction via importance resampling.
 
     Args:
@@ -134,6 +138,8 @@ def steered_reverse_sampling(
     Returns:
         trajectory:     [T, N, *rest, D]
         ess_history:    ESS/N at each step, len = len(t) - 1
+        weight_history: [T, N] normalized particle weights aligned with trajectory;
+                        rows sum to 1 and reset to uniform after resampling.
     """
     _validate_time_grid(t)
     if not torch.all(t[1:] < t[:-1]):
@@ -150,6 +156,7 @@ def steered_reverse_sampling(
 
     log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
     trajectory = [x.clone()]
+    weight_history = [_normalized_weights(log_w)]
     ess_history: list[float] = []
     for step, (t_curr, t_next) in enumerate(zip(t[:-1], t[1:])):
         dt = t_next - t_curr
@@ -173,13 +180,16 @@ def steered_reverse_sampling(
             log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
 
         trajectory.append(x.clone())
+        weight_history.append(_normalized_weights(log_w))
 
     # Final resample according to accumulated weights
     idx = _systematic_resample(log_w)
     x = x[idx]
+    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
     trajectory[-1] = x.clone()
+    weight_history[-1] = _normalized_weights(log_w)
 
-    return torch.stack(trajectory), ess_history
+    return torch.stack(trajectory), ess_history, torch.stack(weight_history)
 
 
 @jaxtyped(typechecker=beartype)

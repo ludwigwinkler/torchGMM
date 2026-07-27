@@ -65,7 +65,7 @@ print(f"GMM: 3 modes at x = [-3, 0, 3], σ = 0.5")
 print(f"target = {TARGET}, λ = {LAMBDA}")
 print(f"N = {N} particles, T = {T} steps, ESS threshold = {ESS}")
 
-traj, ess_hist = steered_reverse_sampling(
+traj, ess_hist, _ = steered_reverse_sampling(
     drift=reverse_drift,
     diffusion=ve_sched.diffusion_coeff,
     weight_update=weight_update,

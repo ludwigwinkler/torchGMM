@@ -192,7 +192,7 @@ def weight_update(x_, t_, dt):
 
 
 traj_unguided = reverse_sampling(reverse_drift, ve_sched.diffusion_coeff, x_init.clone(), t_rev).detach()
-traj_steered, ess_hist = steered_reverse_sampling(
+traj_steered, ess_hist, _ = steered_reverse_sampling(
     drift=guided_drift,
     diffusion=ve_sched.diffusion_coeff,
     weight_update=weight_update,

@@ -101,6 +101,7 @@ plt_show()
 
 sys.exit()
 
+
 # --- tilt schedule beta_t (0 at noise, 1 at data) ---
 # Cosine ramp: smooth at both endpoints, full tilt only near data time.
 def beta_fn(t):
@@ -118,6 +119,7 @@ def beta_fn(t):
 
 def dbeta_dt(t):
     return -2 * (1 - t)
+
 
 # # Linear ramp: smooth at noise, linear near data time.
 # def beta_fn(t):
@@ -163,12 +165,7 @@ def denoise(x_t, t, score_fn, sigma_fn, n_denoise_steps):
     x̂_0 plus leaf tensors so autograd can backprop ∂r(x̂_0)/∂x_t and
     ∂r(x̂_0)/∂t through the unrolled solver."""
     x_t_leaf = x_t.detach().requires_grad_(True)
-    t_leaf = (
-        torch.as_tensor(t, dtype=x_t.dtype, device=x_t.device)
-        .clone()
-        .detach()
-        .requires_grad_(True)
-    )
+    t_leaf = torch.as_tensor(t, dtype=x_t.dtype, device=x_t.device).clone().detach().requires_grad_(True)
     with torch.enable_grad():
         t_min = torch.as_tensor(T_DATA, dtype=x_t.dtype, device=x_t.device)
         x = x_t_leaf
@@ -204,9 +201,7 @@ def run_unguided(sigma_max):
     """Build a Karras-scheduled K=4 GMM with the given σ_max and run unguided
     reverse sampling. Independent of the denoiser used for FKC steering, so
     this is computed once per σ_max and reused across N_DENOISE_STEPS_SWEEP."""
-    schedule = KarrasSchedule(
-        sigma_min=4e-4, sigma_max=sigma_max, rho=7.0, sigma_data=1.0
-    )
+    schedule = KarrasSchedule(sigma_min=4e-4, sigma_max=sigma_max, rho=7.0, sigma_data=1.0)
     gmm_mix = GMM(mu=mu_mix, sigma=sigma_mix, weight=weight_mix, schedule=schedule)
 
     def reverse_drift(x_, t_):
@@ -217,9 +212,7 @@ def run_unguided(sigma_max):
     t_rev = torch.linspace(T_NOISE, T_DATA, N_STEPS)
     x_init = gmm_mix.sample(shape=N_PARTICLES, t=T_NOISE)
 
-    traj_unguided = reverse_sampling(
-        reverse_drift, schedule.diffusion_coeff, x_init.clone(), t_rev
-    ).detach()
+    traj_unguided = reverse_sampling(reverse_drift, schedule.diffusion_coeff, x_init.clone(), t_rev).detach()
 
     # analytic reference densities at data time
     xs = torch.linspace(-6, 6, 200).reshape(-1, 1, 1)
@@ -255,9 +248,7 @@ def run_steered(ctx, n_denoise_steps):
     x_init = ctx["x_init"]
 
     def _reward_and_grads(x_, t_):
-        x0, x_leaf, t_leaf = denoise(
-            x_, t_, gmm_mix.score, schedule.get_sigma_t, n_denoise_steps
-        )
+        x0, x_leaf, t_leaf = denoise(x_, t_, gmm_mix.score, schedule.get_sigma_t, n_denoise_steps)
         rv = r(x0)
         grad_x, grad_t = torch.autograd.grad(rv.sum(), (x_leaf, t_leaf))
         # Score at the current (x_t, t) — needed for the alignment term. With an
@@ -288,7 +279,7 @@ def run_steered(ctx, n_denoise_steps):
     # Fixed seed so the SDE noise is identical across n_denoise_steps — the
     # only knob that varies within a σ_max group.
     torch.manual_seed(0)
-    traj_steered, ess_hist = steered_reverse_sampling(
+    traj_steered, ess_hist, _ = steered_reverse_sampling(
         drift=guided_drift,
         diffusion=schedule.diffusion_coeff,
         weight_update=weight_update,
@@ -298,9 +289,7 @@ def run_steered(ctx, n_denoise_steps):
     )
     traj_steered = traj_steered.detach()
 
-    W2_steered = wasserstein2_1d(
-        traj_steered[-1, :, 0, 0], ctx["xs"].squeeze(), ctx["p_tilt"]
-    )
+    W2_steered = wasserstein2_1d(traj_steered[-1, :, 0, 0], ctx["xs"].squeeze(), ctx["p_tilt"])
     n_resamples = sum(1 for e in ess_hist if e < ESS_THRESHOLD)
 
     return {
@@ -382,23 +371,15 @@ def plot_run(ctx, steered, sigma_max, n_denoise_steps):
     xs_np = xs.squeeze().cpu().numpy()
     bin_w = float(xs[1, 0, 0] - xs[0, 0, 0])
     xs_centers = xs[:, 0, 0].cpu()
-    edges = (
-        torch.cat([xs_centers[0:1] - bin_w / 2, xs_centers + bin_w / 2]).cpu().numpy()
-    )
+    edges = torch.cat([xs_centers[0:1] - bin_w / 2, xs_centers + bin_w / 2]).cpu().numpy()
     xs_centers_np = xs_centers.numpy()
 
     edges_cpu = torch.tensor(edges, device="cpu")
-    h_un, _ = torch.histogram(
-        traj_unguided[-1, :, 0, 0].cpu(), bins=edges_cpu, density=True
-    )
-    h_st, _ = torch.histogram(
-        traj_steered[-1, :, 0, 0].cpu(), bins=edges_cpu, density=True
-    )
+    h_un, _ = torch.histogram(traj_unguided[-1, :, 0, 0].cpu(), bins=edges_cpu, density=True)
+    h_st, _ = torch.histogram(traj_steered[-1, :, 0, 0].cpu(), bins=edges_cpu, density=True)
 
     ax_dens.plot(xs_np, p_data.cpu(), color="steelblue", lw=1.5, label="data $p$")
-    ax_dens.plot(
-        xs_np, p_tilt.cpu(), color="firebrick", lw=1.5, label=r"tilted $p \cdot e^{r}$"
-    )
+    ax_dens.plot(xs_np, p_tilt.cpu(), color="firebrick", lw=1.5, label=r"tilted $p \cdot e^{r}$")
     ax_dens.bar(
         xs_centers_np,
         h_un.numpy(),
@@ -426,9 +407,7 @@ def plot_run(ctx, steered, sigma_max, n_denoise_steps):
 
     ess_t = t_rev_np[: len(ess_hist)]
     ax_ess.plot(ess_t, ess_hist, color="darkorange", lw=1.0, label="ESS / N")
-    ax_ess.axhline(
-        ESS_THRESHOLD, color="red", ls="--", lw=1, label=f"threshold={ESS_THRESHOLD}"
-    )
+    ax_ess.axhline(ESS_THRESHOLD, color="red", ls="--", lw=1, label=f"threshold={ESS_THRESHOLD}")
     ax_ess.set_ylim(0, 1)
     ax_ess.set_xlim(0, 1)
     ax_ess.set_xlabel("t")
@@ -486,9 +465,7 @@ for color, n_denoise_steps in zip(colors, N_DENOISE_STEPS_SWEEP):
     )
     ax_rs.plot(sm, n_rs, "^--", color=color, lw=1.2, alpha=0.5)
 
-ax_w2.plot(
-    sm, w2_un, "s-", color="black", lw=1.8, label=r"$W_2$(unguided $\Vert$ $p$)"
-)
+ax_w2.plot(sm, w2_un, "s-", color="black", lw=1.8, label=r"$W_2$(unguided $\Vert$ $p$)")
 ax_w2.set_xscale("log")
 ax_w2.set_xlabel(r"terminal noise $\sigma_{\max}$ (log scale)")
 ax_w2.set_ylabel(r"$W_2$")
@@ -499,9 +476,7 @@ ax_rs.set_ylim(bottom=0)
 
 lines, labels = ax_w2.get_legend_handles_labels()
 ax_w2.legend(lines, labels, loc="upper left", fontsize=8)
-ax_w2.set_title(
-    r"FKC reverse-sampling quality vs Karras $\sigma_{\max}$ and denoiser substeps ($\rho=7$)"
-)
+ax_w2.set_title(r"FKC reverse-sampling quality vs Karras $\sigma_{\max}$ and denoiser substeps ($\rho=7$)")
 
 fig_sum.savefig(OUT_DIR / "karras_sweep_summary.png", dpi=120, bbox_inches="tight")
 

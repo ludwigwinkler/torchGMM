@@ -82,7 +82,7 @@ print(f"N = {N} particles, T = {T} steps, ESS threshold = {ESS}")
 t_rev = torch.linspace(T_MAX, EPS_R, T)
 x_init = gmm.sample(shape=N, t=T_MAX)
 
-traj, ess_hist = steered_reverse_sampling(
+traj, ess_hist, _ = steered_reverse_sampling(
     drift=reverse_drift,
     diffusion=ve_sched.diffusion_coeff,
     weight_update=weight_update,

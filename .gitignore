@@ -2,7 +2,7 @@
 /worktrees/
 
 # FKC steering debug plots (tests/test_steering.py, generated when PLOT=True)
-tests/steered_*.png
+tests/plots/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -222,4 +222,3 @@ specs/**
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-
