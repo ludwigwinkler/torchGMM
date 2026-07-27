@@ -127,7 +127,7 @@ def run(target_s: float, T_MAX=0.99, EPS_R=1e-3, N_R=5_000, T_R=2_000, ESS=0.9, 
 
     t0 = time.time()
     traj_unguided = reverse_sampling(reverse_drift, ve_sched.diffusion_coeff, x_init.clone(), t_rev).detach()
-    traj_steered, ess_hist = steered_reverse_sampling(
+    traj_steered, ess_hist, _ = steered_reverse_sampling(
         drift=guided_drift,
         diffusion=ve_sched.diffusion_coeff,
         weight_update=weight_update,

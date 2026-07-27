@@ -125,7 +125,7 @@ def weight_update(x_, t_, dt):
     return (rv - beta * rg * f + beta * rg * (g**2 / 2) * sc).squeeze(-1).squeeze(-1) * dt.abs()
 
 
-traj_steer, ess_hist = steered_reverse_sampling(
+traj_steer, ess_hist, _ = steered_reverse_sampling(
     guided_drift, schedule.diffusion_coeff, weight_update, x_noise_steer, t_steer, ess_threshold=ESS_THRESHOLD
 )
 

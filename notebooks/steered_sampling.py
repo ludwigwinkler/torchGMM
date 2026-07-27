@@ -45,7 +45,7 @@ for row, (rc, rs) in tqdm(enumerate(rewards)):
         beta = 1 - t_
         return (rv - beta * rg * f + beta * rg * (g**2 / 2) * sc).squeeze(-1).squeeze(-1) * dt.abs()
 
-    traj, ess_hist = steered_reverse_sampling(
+    traj, ess_hist, _ = steered_reverse_sampling(
         drift=guided_drift,
         diffusion=sched.diffusion_coeff,
         weight_update=weight_update,

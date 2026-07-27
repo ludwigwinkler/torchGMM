@@ -10,13 +10,13 @@ import matplotlib
 
 matplotlib.use("Agg")  # non-interactive backend; suppresses plot windows in tests
 
-os.environ["OMP_NUM_THREADS"] = "2"
-os.environ["MKL_NUM_THREADS"] = "2"
-os.environ["OPENBLAS_NUM_THREADS"] = "2"
+# os.environ["OMP_NUM_THREADS"] = "2"
+# os.environ["MKL_NUM_THREADS"] = "2"
+# os.environ["OPENBLAS_NUM_THREADS"] = "2"
 
 import torch  # noqa: E402
 
-torch.set_num_threads(1)
+# torch.set_num_threads(1)
 
 
 def get_local_device() -> torch.device:
