@@ -297,3 +297,11 @@ class KarrasSchedule(Schedule):
         sigma_t = self.get_sigma_t(t)
         dsigma_dt = self.get_dsigma_dt(t)
         return torch.sqrt(2 * sigma_t * dsigma_dt)
+
+
+# Functional Karras schedule: σ(t) as a free function (no class instance). It's the
+# only closed form — for the VE variance use autograd, g²(t) = 2σσ̇ = d(σ²)/dt.
+def karras_sigma(t, sigma_min=4e-4, sigma_max=160.0, rho=7.0, sigma_data=1.0):
+    """σ(t) = σ_data · (σ_min^{1/ρ} + t·(σ_max^{1/ρ} − σ_min^{1/ρ}))^ρ."""
+    u_min, u_max = sigma_min ** (1.0 / rho), sigma_max ** (1.0 / rho)
+    return sigma_data * (u_min + t * (u_max - u_min)) ** rho
