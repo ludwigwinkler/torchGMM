@@ -9,7 +9,7 @@ Package-level guidance for working inside this directory.
 | `__init__.py` | Public re-exports only — no logic |
 | `gmm.py` | `GMM` and `Conditional` classes |
 | `schedule.py` | `Schedule`, `BetaSchedule`, `LinearSchedule`, `VESchedule`, `KarrasSchedule` |
-| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `steered_reverse_sampling` |
+| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `reverse_churn_sampling`, `steered_reverse_sampling` |
 
 ## Shape convention
 
@@ -50,7 +50,15 @@ Subclass `Schedule`, implement the four abstract methods, add `@jaxtyped(typeche
 
 ## Adding a new sampling function
 
-Follow the pattern in `sampling.py`: validate the time grid with `_validate_time_grid`, delegate to `euler_maruyama`, annotate `x: Float[Tensor, "*batch D"]` and `t: Float[Tensor, " T"]`.
+Follow the pattern in `sampling.py`: validate the time grid with `_validate_time_grid`, check the
+direction, delegate to `euler_maruyama`, annotate `x: Float[Tensor, "*batch D"]` and
+`t: Float[Tensor, " T"]`.
+
+A sampler that is *not* an Euler-Maruyama discretisation gets its own function rather than an
+integrator hook on the existing ones — `reverse_churn_sampling` is the example. Its two callables
+are complete operators (`schedule.transition`, `gmm.velocity`), not the drift/diffusion terms of a
+single SDE, so it names them for what they are and owns its own loop. Take the callables off the
+`Schedule`/`GMM` directly; don't capture the schedule object wholesale or wrap it in a factory.
 
 ## What NOT to do
 

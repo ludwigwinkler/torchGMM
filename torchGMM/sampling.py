@@ -89,6 +89,67 @@ def reverse_sampling(
     return euler_maruyama(drift, diffusion, x, t)
 
 
+@jaxtyped(typechecker=beartype)
+def reverse_churn_sampling(
+    velocity: Callable,
+    transition: Callable,
+    x: Float[Tensor, "*batch D"],
+    t: Float[Tensor, " T"],
+    churn: float = 1.0,
+) -> Float[Tensor, "T *batch D"]:
+    """Churn sampling (EDM Alg. 2): re-noise to t+h, then transport back past it to t+dt.
+
+    Not an SDE discretisation but an operator splitting, which is why it is a separate
+    function rather than an integrator swapped into `reverse_sampling`. Each step composes
+    two operators, each of which maps a distribution to a distribution on its own:
+
+      1. `transition(x, t, t+h)` — the exact forward kernel, h = churn·|dt|. Unlike an
+         Euler step of the forward SDE it maps p_t onto p_{t+h} exactly, for any h. That
+         exactness is the point: with a first-order churn the whole scheme collapses to
+         reverse-SDE Euler-Maruyama up to O(h^{3/2}) and the splitting buys nothing.
+      2. `velocity(x, t) * (t + dt - (t+h))` — probability-flow transport, spanning
+         -(|dt| + h) since it has to undo the churn as well as advance one grid step.
+
+    Both preserve the marginal family, so the composition lands on p_{t+dt}. Contrast
+    `reverse_sampling`, where drift and diffusion are the two *terms* of one SDE, added at
+    the same t over the same dt.
+
+    Reverse-only: on an increasing grid the churn would run with the direction of travel
+    instead of against it, and at churn=1 the transport span collapses to zero. Forward
+    noising needs no sampler at all — `schedule.transition` jumps t -> s in a single draw.
+
+    Args:
+        velocity:   (x, t) -> [*batch, D]; the probability-flow velocity, e.g. `gmm.velocity`.
+                    NOT the reverse SDE drift f - g²s — the churn already supplies the
+                    stochasticity, so a score-corrected drift double-counts it.
+        transition: (x, t, s) -> [*batch, D]; the exact forward kernel, i.e. `schedule.transition`
+        x:          Initial state [*batch, D]
+        t:          1D strictly decreasing time grid in [0, 1], >= 2 points
+        churn:      Churn strength as a multiple of the step size, h = churn·|dt|. This is
+                    EDM's S_churn/N knob: 0 is the deterministic probability-flow ODE, 1
+                    re-noises a full step back before transporting two steps down, and >1
+                    over-churns (the transport then spans more than two steps). Values
+                    above 1 can push t+h past 1 for the first steps, where it is clamped
+                    and the transport span shrinks to match.
+
+    Returns:
+        Trajectory [T, *batch, D]
+    """
+    _validate_time_grid(t)
+    if not torch.all(t[1:] < t[:-1]):
+        raise ValueError("t must be strictly decreasing for reverse_churn_sampling")
+    if churn < 0:
+        raise ValueError(f"churn must be non-negative, got {churn}")
+    trajectory = [x.clone()]
+    for t_curr, dt in zip(t[:-1], t[1:] - t[:-1]):
+        t_hat = (t_curr + churn * dt.abs()).clamp(max=1.0)
+        if churn > 0:
+            x = transition(x, t_curr, t_hat)  # exact forward kernel, t -> t̂
+        x = x + velocity(x, t_curr) * (t_curr + dt - t_hat)  # PF-ODE transport t̂ -> t+dt
+        trajectory.append(x.clone())
+    return torch.stack(trajectory)
+
+
 def _ess_ratio(log_w: torch.Tensor) -> float:
     lw = log_w - torch.logsumexp(log_w, 0)
     return (torch.exp(-torch.logsumexp(2 * lw, 0)) / log_w.shape[0]).item()

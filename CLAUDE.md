@@ -43,6 +43,7 @@ ty check torchGMM
 - `VESchedule` — variance-exploding (SMLD/NCSN) schedule; α_t ≡ 1, geometric σ_t
 - `KarrasSchedule` — Karras et al. / AlphaFold3-style VE schedule with ρ-controlled step concentration; α_t ≡ 1
 - `forward_sampling`, `reverse_sampling` — Euler-Maruyama SDE/ODE simulation
+- `reverse_churn_sampling` — EDM Algorithm 2 churn sampler (exact re-noise + probability-flow transport)
 - `steered_reverse_sampling` — Feynman-Kac-Corrector (FKC) steered reverse sampling with SMC importance resampling
 
 **Key abstractions:**
@@ -51,9 +52,17 @@ ty check torchGMM
 - Scalars like `log_prob` / `energy`: `[*N, *B]`
 - Vectors like `score` / `sample`: `[*N, *B, D]`
 
-`Schedule` base class provides `get_alpha_t`, `get_sigma_t`, `get_dalpha_dt`, `get_dsigma_dt`, `forward_drift`, and `diffusion_coeff`. `BetaSchedule`, `LinearSchedule`, `VESchedule`, and `KarrasSchedule` are concrete implementations; the latter two are variance-exploding (α_t ≡ 1) and typically paired with `diffusion=None` (probability-flow ODE) or the FKC steering sampler below.
+`Schedule` base class provides `get_alpha_t`, `get_sigma_t`, `get_dalpha_dt`, `get_dsigma_dt`, `forward_drift`, `diffusion_coeff`, and `transition` — the exact forward kernel `q(x_s | x_t)`, which maps `p_t` onto `p_s` in a single draw for any gap (derived in `docs/schedule.md`). `BetaSchedule`, `LinearSchedule`, `VESchedule`, and `KarrasSchedule` are concrete implementations; the latter two are variance-exploding (α_t ≡ 1) and typically paired with `diffusion=None` (probability-flow ODE) or the FKC steering sampler below.
 
 `sampling.py` implements Euler-Maruyama for forward and reverse SDEs. Both `forward_sampling` and `reverse_sampling` take `drift: callable`, `diffusion: callable | None`, initial state `x`, and a time grid `t`. The caller constructs drift/diffusion callables from the schedule and GMM score before calling.
+
+`reverse_churn_sampling` is the EDM Algorithm 2 sampler (see `docs/churn_sampler.md`). It is an *operator splitting*, not an SDE discretisation, so it is a separate function rather than an integrator swapped into `reverse_sampling`, and its two callables are complete operators rather than the drift/diffusion terms of one SDE:
+
+```python
+reverse_churn_sampling(gmm.velocity, schedule.transition, x, t)
+```
+
+Each step re-noises to `t + |dt|` with the exact forward kernel `Schedule.transition`, then transports the probability flow over `dt - |dt| = -2|dt|`, undoing the churn as well as advancing one grid step. Both operators preserve the marginal family, so the composition lands on `p_{t+dt}`. The kernel's exactness is the point: with a first-order churn the whole scheme collapses to reverse-SDE Euler-Maruyama up to `O(h^{3/2})`. It is reverse-only — on an increasing grid `dt - |dt|` is zero — and forward noising needs no sampler at all, since `schedule.transition` jumps `t -> s` exactly in one draw.
 
 `steered_reverse_sampling` runs the same Euler-Maruyama loop as an SMC particle filter: alongside `drift`/`diffusion` it takes a `weight_update(x, t, dt) -> [N]` callable returning incremental log importance weights, and systematically resamples particles according to `ess_threshold`, which selects one of two resampling strategies — adaptive (`0 < ess_threshold < 1`: resample whenever ESS/N drops below the threshold) or fixed-interval (`ess_threshold >= 1`, a whole number: resample unconditionally every `int(ess_threshold)` steps); setting the interval past the total step count degenerates to a single resample after the final step. This implements Feynman-Kac-Corrector steering (see `docs/fkc_steering.md`) to sample from a reward-tilted target `p(x) ∝ q(x) exp(β·r(x))` with exact importance weights, without retraining the underlying model. `notebooks/ve_steering.py` and `notebooks/karras_terminal_variance_steering.py` demonstrate the pattern: a reward `r(x_0)` on denoised samples, a tilt schedule `β(t)`, and gradients of `r` backpropagated through an unrolled ODE denoiser to build `weight_update`.
 
