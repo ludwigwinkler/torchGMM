@@ -45,6 +45,7 @@ ty check torchGMM
 - `forward_sampling`, `reverse_sampling` — Euler-Maruyama SDE/ODE simulation
 - `reverse_churn_sampling` — EDM Algorithm 2 churn sampler (exact re-noise + probability-flow transport)
 - `steered_reverse_sampling` — Feynman-Kac-Corrector (FKC) steered reverse sampling with SMC importance resampling
+- `steered_reverse_churn_sampling` — FKC steering on the churn sampler, weighted by the endpoint potential
 
 **Key abstractions:**
 
@@ -62,7 +63,15 @@ ty check torchGMM
 reverse_churn_sampling(gmm.velocity, schedule.transition, x, t)
 ```
 
-Each step re-noises to `t + |dt|` with the exact forward kernel `Schedule.transition`, then transports the probability flow over `dt - |dt| = -2|dt|`, undoing the churn as well as advancing one grid step. Both operators preserve the marginal family, so the composition lands on `p_{t+dt}`. The kernel's exactness is the point: with a first-order churn the whole scheme collapses to reverse-SDE Euler-Maruyama up to `O(h^{3/2})`. It is reverse-only — on an increasing grid `dt - |dt|` is zero — and forward noising needs no sampler at all, since `schedule.transition` jumps `t -> s` exactly in one draw.
+Each step re-noises to `t + |dt|` with the exact forward kernel `Schedule.transition`, then transports the probability flow over `dt - |dt| = -2|dt|`, undoing the churn as well as advancing one grid step. The velocity is evaluated at the *reheated* time, since that is where the churned state actually lives. Both operators preserve the marginal family, so the composition lands on `p_{t+dt}`. The kernel's exactness is the point: with a first-order churn the whole scheme collapses to reverse-SDE Euler-Maruyama up to `O(h^{3/2})`. It is reverse-only — on an increasing grid `dt - |dt|` is zero — and forward noising needs no sampler at all, since `schedule.transition` jumps `t -> s` exactly in one draw.
+
+`steered_reverse_churn_sampling` is the FKC-steered churn sampler (see `docs/fkc_churn_steering.md`). It layers the same SMC machinery as `steered_reverse_sampling` — identical `ess_threshold` contract, identical `(trajectory, ess_history, weight_history)` return — onto that splitting, but takes the tilt exponent `potential(x, t) -> [N]` instead of an incremental `weight_update`:
+
+```python
+steered_reverse_churn_sampling(gmm.velocity, schedule.transition, potential, x, t, churn=1.0)
+```
+
+Because the base churn kernel already maps `q_t` onto `q_{t+dt}` exactly, the entire importance correction is the endpoint difference `ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t)`. That makes it markedly cheaper to wire up than the Euler-Maruyama route: no `β̇_t`, no `∂_t r`, no reward Laplacian, no score-alignment term, and no reward *gradient*, so a denoiser inside `potential` is never backpropagated through. The drift stays unguided — the tilt lives entirely in the weights. `tests/test_churn_steering.py` asserts it reaches the same tilted marginals as the Euler-Maruyama sampler across ~50 intermediate time slots on both `BetaSchedule` and `KarrasSchedule`.
 
 `steered_reverse_sampling` runs the same Euler-Maruyama loop as an SMC particle filter: alongside `drift`/`diffusion` it takes a `weight_update(x, t, dt) -> [N]` callable returning incremental log importance weights, and systematically resamples particles according to `ess_threshold`, which selects one of two resampling strategies — adaptive (`0 < ess_threshold < 1`: resample whenever ESS/N drops below the threshold) or fixed-interval (`ess_threshold >= 1`, a whole number: resample unconditionally every `int(ess_threshold)` steps); setting the interval past the total step count degenerates to a single resample after the final step. This implements Feynman-Kac-Corrector steering (see `docs/fkc_steering.md`) to sample from a reward-tilted target `p(x) ∝ q(x) exp(β·r(x))` with exact importance weights, without retraining the underlying model. `notebooks/ve_steering.py` and `notebooks/karras_terminal_variance_steering.py` demonstrate the pattern: a reward `r(x_0)` on denoised samples, a tilt schedule `β(t)`, and gradients of `r` backpropagated through an unrolled ODE denoiser to build `weight_update`.
 

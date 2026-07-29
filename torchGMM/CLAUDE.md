@@ -9,7 +9,7 @@ Package-level guidance for working inside this directory.
 | `__init__.py` | Public re-exports only — no logic |
 | `gmm.py` | `GMM` and `Conditional` classes |
 | `schedule.py` | `Schedule`, `BetaSchedule`, `LinearSchedule`, `VESchedule`, `KarrasSchedule` |
-| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `reverse_churn_sampling`, `steered_reverse_sampling` |
+| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `reverse_churn_sampling`, `steered_reverse_sampling`, `steered_reverse_churn_sampling` |
 
 ## Shape convention
 
@@ -59,6 +59,26 @@ integrator hook on the existing ones — `reverse_churn_sampling` is the example
 are complete operators (`schedule.transition`, `gmm.velocity`), not the drift/diffusion terms of a
 single SDE, so it names them for what they are and owns its own loop. Take the callables off the
 `Schedule`/`GMM` directly; don't capture the schedule object wholesale or wrap it in a factory.
+
+The velocity in both churn samplers is evaluated at the **reheated** time `t̂`, not at `t`: after
+the churn the state is distributed according to `p_t̂`, so the score at `t` is the wrong one for it
+(`docs/fkc_churn_steering.md` §5).
+
+## Steering: two samplers, two weight contracts
+
+`steered_reverse_sampling` takes an *incremental* `weight_update(x, t, dt) -> [N]` because it
+discretises a continuous-time SDE, so the weight is the Prop. D.6 integrand times `dt`.
+
+`steered_reverse_churn_sampling` instead takes the tilt exponent itself, `potential(x, t) -> [N]`,
+because a churn step is a discrete proposal kernel that already maps `q_t` onto `q_{t+dt}` exactly.
+The whole correction is then the endpoint difference `ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t)` — no `β̇_t`,
+no `∂_t r`, no reward Laplacian, no score-alignment inner product, and no reward gradient at all,
+so a denoiser inside `potential` never needs to be backpropagated through. Do not hand it a
+reward-guided drift: the base probability flow must stay untouched for the endpoint difference to
+be the exact correction (`docs/fkc_churn_steering.md` §3, §6).
+
+`ρ` is carried across steps and *gathered* on a resample rather than re-evaluated — `potential`
+may be expensive, and recomputing the ancestor's tilt would double its cost per step.
 
 ## What NOT to do
 
