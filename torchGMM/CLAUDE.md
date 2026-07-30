@@ -73,12 +73,26 @@ discretises a continuous-time SDE, so the weight is the Prop. D.6 integrand time
 because a churn step is a discrete proposal kernel that already maps `q_t` onto `q_{t+dt}` exactly.
 The whole correction is then the endpoint difference `ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t)` — no `β̇_t`,
 no `∂_t r`, no reward Laplacian, no score-alignment inner product, and no reward gradient at all,
-so a denoiser inside `potential` never needs to be backpropagated through. Do not hand it a
-reward-guided drift: the base probability flow must stay untouched for the endpoint difference to
-be the exact correction (`docs/fkc_churn_steering.md` §3, §6).
+so a denoiser inside `potential` never needs to be backpropagated through. Never pass a
+reward-guided drift in as `velocity` — the endpoint difference is the exact correction only for
+the *unmodified* probability flow.
+
+To guide the flow, use the `guidance` parameter instead, which pairs the extra field `u` with its
+own compensation `∇·u + ⟨s_t, u⟩` (see `docs/churn_fkc_algorithm.md` §6). A deterministic half has
+no diffusion term, so unlike Prop. D.6 the reward Laplacian does *not* cancel and that term has to
+be supplied explicitly; omitting it still yields high-reward samples while targeting the wrong
+distribution, which is why `tests/test_churn_steering.py` asserts that deleting it makes W1
+markedly worse rather than merely testing that guidance runs.
 
 `ρ` is carried across steps and *gathered* on a resample rather than re-evaluated — `potential`
 may be expensive, and recomputing the ancestor's tilt would double its cost per step.
+
+Two behaviours of `resample_at_churn` are worth knowing before relying on it. In adaptive mode it
+implements the doc's two-test scheme (ESS after reheating, then again after transport). In
+fixed-interval mode both tests share the same `step` index, so on an interval boundary the
+resample fires *twice* in one iteration — valid, but it spends two rounds of resampling variance
+on one round of weight information. And `ess_history` records only the post-transport ESS, so the
+churn-half value is not observable from the return.
 
 ## What NOT to do
 

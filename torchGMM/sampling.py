@@ -338,7 +338,12 @@ def steered_reverse_churn_sampling(
                        u = c∇ρ with a Gaussian reward it is a constant) and estimating it
                        numerically would defeat the purpose.
         resample_at_churn: also weight and test ESS after the churn half, at the reheated
-                       state. Costs one extra `potential` call per step.
+                       state. Costs one extra `potential` call per step. Two caveats: in
+                       fixed-interval mode both tests share the same step index, so on an
+                       interval boundary the resample fires twice in one iteration — valid,
+                       but it spends two rounds of resampling variance on one round of
+                       weight information; and `ess_history` records only the
+                       post-transport value, so the churn-half ESS is not returned.
 
     Returns:
         trajectory:     [T, N, *rest, D]

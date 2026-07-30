@@ -354,9 +354,16 @@ $$v=\hat\sigma_i^2-\sigma_i^2=\bigl((1+\gamma_i)^2-1\bigr)\sigma_i^2=\gamma_i(2+
 
 so EDM's clamp $\gamma_i\le\sqrt2-1$ is exactly the requirement $\hat\sigma_i^2\le2\sigma_i^2$, i.e. injected variance at most the current variance. Both EDM branches are therefore the one kernel evaluated on two different $(\alpha,\sigma)$ paths; only the scale factor distinguishes them.
 
-### First-order (Euler-Maruyama) approximation
+### First-order (Euler-Maruyama) approximation — the road not taken
 
-The code's churn integrator (`churn_step` in `sampling.py`) does not use the closed-form kernel. It takes one Euler-Maruyama step of the forward SDE over $h=\gamma|dt|$ using `schedule.forward_drift` and `schedule.diffusion_coeff`:
+The churn samplers in `sampling.py` use the closed-form kernel above: they take
+`Schedule.transition` as a callable and jump $t\rightarrow\hat t$ in one exact draw. This
+subsection derives what the *alternative* would cost, because that difference is the
+entire reason the exact kernel is worth threading through the API — and it is where the
+$O(h^{3/2})$ figure quoted in `reverse_churn_sampling`'s docstring comes from.
+
+The alternative is one Euler-Maruyama step of the forward SDE over $h=\gamma|dt|$, using
+only `schedule.forward_drift` and `schedule.diffusion_coeff`:
 
 $$X_{t+h}\;\approx\;X_t+f(X_t,t)\,h+g(t)\sqrt{h}\,\eta
 =\left(1+\frac{\dot\alpha_t}{\alpha_t}h\right)X_t+g(t)\sqrt{h}\,\eta .$$
@@ -378,4 +385,6 @@ $$v(h)=\alpha_{t+h}^2\int_t^{t+h}\frac{d}{du}\left(\lambda_u^2\right)du
 
 So the Euler injection $g(t)\sqrt{h}$ matches the exact standard deviation $\sqrt{v(h)}=g(t)\sqrt{h}\,(1+O(h))$ up to a relative $O(h)$, i.e. an absolute $O(h^{3/2})$ discrepancy per step. The VE case makes this concrete: $v(h)=\sigma_{t+h}^2-\sigma_t^2=2\sigma_t\dot\sigma_th+(\dot\sigma_t^2+\sigma_t\ddot\sigma_t)h^2+O(h^3)$, whose leading term is $g(t)^2h$ exactly.
 
-**What is lost.** Both halves of the churn step are therefore first order: the marginal after an Euler churn is $p(\cdot;\hat t)$ only to $O(h)$, whereas the boxed kernel maps it exactly for any $h$. This weakens the "churn is exact" leg of the splitting argument in `churn_sampler.md` §5 to "churn is exact in the small-step limit". The trade is deliberate — the Euler form needs only `forward_drift` and `diffusion_coeff`, which every `Schedule` supplies, while the exact kernel additionally needs $\alpha$ and $\sigma$ evaluated at the churned time $\hat t$ and is only worth the extra evaluations when the churn fraction $\gamma$ is large.
+**What the Euler form would cost.** Both halves of the churn step would be first order: the marginal after an Euler churn is $p(\cdot;\hat t)$ only to $O(h)$, whereas the boxed kernel maps it exactly for any $h$. That would weaken the "churn is exact" leg of the splitting argument in `churn_sampler.md` §5 to "churn is exact in the small-step limit", and with it the whole reason to prefer a splitting over a plain reverse-SDE discretisation — with a first-order churn the scheme collapses back to Euler-Maruyama up to $O(h^{3/2})$ and the splitting buys nothing.
+
+Since the exact kernel needs only $\alpha$ and $\sigma$ at the churned time $\hat t$ — closed form for every `Schedule`, and no model evaluation — the extra cost is negligible and the samplers take it unconditionally. The Euler form is retained here only as the comparison that quantifies the gap.
