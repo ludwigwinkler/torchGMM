@@ -5,7 +5,7 @@ The whole point of the comparison is that the two samplers reach the *same* tilt
 marginals p_t ∝ q_t·exp(ρ_t) by structurally different routes: the EM sampler guides the
 drift and carries a continuous-time weight (β̇r, ∂_t r, score-alignment; Prop. D.6), while
 the churn sampler leaves its probability flow untouched and carries only the endpoint
-difference ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t) (docs/fkc_churn_steering.md §3). So the reward
+difference ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t) (docs/fkc_churn_steering.md §4). So the reward
 plumbing here is deliberately much smaller — no gradients, no β̇ — and the marginal
 assertions are deliberately identical.
 """
@@ -17,6 +17,7 @@ import torch
 from test_steering import (
     PLOT,
     KarrasDenoiseMixin,
+    _dbeta_dt,
     _plot_dir,
     _tilted_density,
     _wasserstein1,
@@ -59,28 +60,19 @@ class TestChurnSteeringControlFlow:
     def _potential(x, t):
         return -(x.squeeze(-1) * t)
 
-    def _bias_x0(self):
-        return torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
-
-    def _run(self, ess_threshold):
-        x0 = self._bias_x0()
+    def test_shapes_and_normalisation(self):
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
         t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
-        return (
+        traj, ess_hist, weight_hist = steered_reverse_churn_sampling(
+            self._zero_velocity,
+            self._no_transition,
+            None,
             x0,
             t,
-            steered_reverse_churn_sampling(
-                self._zero_velocity,
-                self._no_transition,
-                self._potential,
-                x0,
-                t,
-                churn=0.0,
-                ess_threshold=ess_threshold,
-            ),
+            churn=0.0,
+            ess_threshold=0.7,
+            potential=self._potential,
         )
-
-    def test_shapes_and_normalisation(self):
-        x0, _, (traj, ess_hist, weight_hist) = self._run(0.7)
         assert traj.shape == (self.N_STEPS, self.N, 1)
         assert weight_hist.shape == (self.N_STEPS, self.N)
         assert len(ess_hist) == self.N_STEPS - 1
@@ -90,7 +82,18 @@ class TestChurnSteeringControlFlow:
     def test_ess_trace_matches_analytic_prediction_before_first_resample(self):
         """Until the first gather the particles are untouched, so the ESS trace is a closed
         form: log w accumulates bias·|dt| from a fixed linspace bias."""
-        _, t, (_, ess_hist, _) = self._run(1_000)  # interval >> steps: no intermittent resample
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
+        _, ess_hist, _ = steered_reverse_churn_sampling(
+            self._zero_velocity,
+            self._no_transition,
+            None,
+            x0,
+            t,
+            churn=0.0,
+            ess_threshold=1_000,  # interval >> steps: no intermittent resample
+            potential=self._potential,
+        )
         bias = torch.linspace(-self.K, self.K, self.N)
         log_w = torch.zeros(self.N)
         predicted = []
@@ -101,7 +104,18 @@ class TestChurnSteeringControlFlow:
 
     def test_interval_mode_resets_weights_on_schedule(self):
         interval = 5
-        _, _, (traj, _, weight_hist) = self._run(interval)
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
+        _, _, weight_hist = steered_reverse_churn_sampling(
+            self._zero_velocity,
+            self._no_transition,
+            None,
+            x0,
+            t,
+            churn=0.0,
+            ess_threshold=interval,
+            potential=self._potential,
+        )
         uniform = torch.full((self.N,), 1 / self.N)
         for step in range(1, self.N_STEPS):
             expect_uniform = step % interval == 0 or step == self.N_STEPS - 1
@@ -109,37 +123,85 @@ class TestChurnSteeringControlFlow:
             assert is_uniform == expect_uniform, f"step {step}: uniform={is_uniform}, expected {expect_uniform}"
 
     def test_threshold_one_resamples_every_step(self):
-        _, _, (_, _, weight_hist) = self._run(1)
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
+        _, _, weight_hist = steered_reverse_churn_sampling(
+            self._zero_velocity,
+            self._no_transition,
+            None,
+            x0,
+            t,
+            churn=0.0,
+            ess_threshold=1,
+            potential=self._potential,
+        )
         uniform = torch.full((self.N,), 1 / self.N)
         assert torch.allclose(weight_hist, uniform.expand_as(weight_hist), atol=1e-6)
 
     def test_final_resample_always_fires(self):
-        _, _, (_, _, weight_hist) = self._run(1_000)
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
+        _, _, weight_hist = steered_reverse_churn_sampling(
+            self._zero_velocity,
+            self._no_transition,
+            None,
+            x0,
+            t,
+            churn=0.0,
+            ess_threshold=1_000,  # interval >> steps: only the mandatory final resample fires
+            potential=self._potential,
+        )
         uniform = torch.full((self.N,), 1 / self.N)
         assert not torch.allclose(weight_hist[-2], uniform, atol=1e-6)
         assert torch.allclose(weight_hist[-1], uniform, atol=1e-6)
 
     @pytest.mark.parametrize("bad_threshold", [0, -1, -0.5])
     def test_non_positive_threshold_rejected(self, bad_threshold):
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
         with pytest.raises(ValueError, match="positive"):
-            self._run(bad_threshold)
+            steered_reverse_churn_sampling(
+                self._zero_velocity,
+                self._no_transition,
+                None,
+                x0,
+                t,
+                churn=0.0,
+                ess_threshold=bad_threshold,
+                potential=self._potential,
+            )
 
     @pytest.mark.parametrize("bad_threshold", [2.5, 1.5, 10.25])
     def test_non_integer_interval_threshold_rejected(self, bad_threshold):
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
+        t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
         with pytest.raises(ValueError, match="whole number"):
-            self._run(bad_threshold)
+            steered_reverse_churn_sampling(
+                self._zero_velocity,
+                self._no_transition,
+                None,
+                x0,
+                t,
+                churn=0.0,
+                ess_threshold=bad_threshold,
+                potential=self._potential,
+            )
 
     def test_t_must_be_decreasing(self):
-        x0 = self._bias_x0()
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
         t = torch.linspace(1e-3, 1.0 - 1e-3, self.N_STEPS)
         with pytest.raises(ValueError, match="strictly decreasing"):
-            steered_reverse_churn_sampling(self._zero_velocity, self._no_transition, self._potential, x0, t, churn=0.0)
+            steered_reverse_churn_sampling(
+                self._zero_velocity, self._no_transition, None, x0, t, churn=0.0, potential=self._potential
+            )
 
     def test_negative_churn_rejected(self):
-        x0 = self._bias_x0()
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
         t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
         with pytest.raises(ValueError, match="non-negative"):
-            steered_reverse_churn_sampling(self._zero_velocity, self._no_transition, self._potential, x0, t, churn=-0.5)
+            steered_reverse_churn_sampling(
+                self._zero_velocity, self._no_transition, None, x0, t, churn=-0.5, potential=self._potential
+            )
 
 
 class TestChurnSteeringReducesToUnsteered:
@@ -170,7 +232,7 @@ class TestChurnSteeringReducesToUnsteered:
         unsteered = reverse_churn_sampling(gmm.velocity, schedule.transition, x0, t, churn=churn)
         torch.manual_seed(0)
         steered, ess_hist, weight_hist = steered_reverse_churn_sampling(
-            gmm.velocity, schedule.transition, zero_potential, x0, t, churn=churn, ess_threshold=0.5
+            gmm.velocity, schedule.transition, None, x0, t, churn=churn, ess_threshold=0.5, potential=zero_potential
         )
 
         assert torch.allclose(unsteered, steered, atol=1e-6)
@@ -213,41 +275,42 @@ class TestChurnSteeringFinalResampleOnly:
     def setup(self):
         sched = BetaSchedule(beta_min=0.1, beta_max=20.0)
         gmm = GMM(
-            mu=torch.tensor([[[-2.5], [2.5]]], dtype=torch.float64),
-            sigma=torch.tensor([[[0.8], [0.8]]], dtype=torch.float64),
-            weight=torch.tensor([[0.2, 0.8]], dtype=torch.float64),
+            mu=torch.tensor([[[-2.5], [0], [2.5]]], dtype=torch.float64),
+            sigma=torch.tensor([[[0.8], [0.8], [0.8]]], dtype=torch.float64),
+            weight=torch.tensor([[0.2, 0.6, 0.2]], dtype=torch.float64),
             schedule=sched,
         )
         return gmm, sched
 
-    def _rho(self, x, t):
-        beta = 1.0 - t
-        r = -0.5 * (x - self.REWARD_CENTER) ** 2 / self.REWARD_SIGMA**2
-        return (beta * r).squeeze(-1).squeeze(-1)
-
-    def _grid(self):
-        return torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS, dtype=torch.float64)
-
-    def _x0(self, gmm):
-        torch.manual_seed(0)
-        return gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
-
     def test_unguided_log_weights_telescope_to_the_endpoint_difference(self, setup):
         gmm, sched = setup
-        t, x0 = self._grid(), self._x0(gmm)
+
+        def r(x):
+            return -0.5 * (x - self.REWARD_CENTER) ** 2 / self.REWARD_SIGMA**2
+
+        def beta_fn(t_):
+            return 1.0 - t_
+
+        def rho(x, t_):
+            return (beta_fn(t_) * r(x)).squeeze(-1).squeeze(-1)
+
+        torch.manual_seed(0)
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS, dtype=torch.float64)
+        x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
         traj, _, weight_hist = steered_reverse_churn_sampling(
             gmm.velocity,
             sched.transition,
-            self._rho,
+            None,
             x0,
             t,
             churn=self.CHURN,
             ess_threshold=self.FINAL_ONLY,
+            potential=rho,
         )
-        rho_0 = self._rho(traj[0], t[0])
+        rho_0 = rho(traj[0], t[0])
         # Index -1 is overwritten by the mandatory final resample, so check up to -2.
         for i in range(1, self.N_STEPS - 1):
-            expected = torch.softmax(self._rho(traj[i], t[i]) - rho_0, dim=0)
+            expected = torch.softmax(rho(traj[i], t[i]) - rho_0, dim=0)
             assert torch.allclose(weight_hist[i], expected, atol=1e-12), (
                 f"step {i}: accumulated weights do not equal softmax(ρ_i − ρ_0); "
                 f"max deviation {(weight_hist[i] - expected).abs().max():.3e}"
@@ -261,37 +324,54 @@ class TestChurnSteeringFinalResampleOnly:
         returned trajectory, so it cannot be reconstructed after the fact.
         """
         gmm, sched = setup
-        t, x0 = self._grid(), self._x0(gmm)
         c = 0.5
         recorded = []
 
-        def guidance(x, t_hat):
+        def r(x):
+            return -0.5 * (x - self.REWARD_CENTER) ** 2 / self.REWARD_SIGMA**2
+
+        def beta_fn(t_):
+            return 1.0 - t_
+
+        def rho(x, t_):
+            return (beta_fn(t_) * r(x)).squeeze(-1).squeeze(-1)
+
+        def _grad_rho(x, t_hat):
+            return -(1.0 - t_hat) * (x - self.REWARD_CENTER) / self.REWARD_SIGMA**2
+
+        def guided_drift(x, t_hat):
             g2 = sched.diffusion_coeff(t_hat) ** 2
-            grad_rho = -(1.0 - t_hat) * (x - self.REWARD_CENTER) / self.REWARD_SIGMA**2
-            u = c * (g2 / 2) * grad_rho
+            return gmm.velocity(x, t_hat) + c * (g2 / 2) * _grad_rho(x, t_hat)
+
+        def compensation(x, t_hat, dt):
+            g2 = sched.diffusion_coeff(t_hat) ** 2
+            grad_rho = _grad_rho(x, t_hat)
             lap_rho = -(1.0 - t_hat) / self.REWARD_SIGMA**2  # D = 1
             corr = c * (g2 / 2) * (lap_rho + (gmm.score(x, t_hat) * grad_rho).sum(-1).squeeze(-1))
-            recorded.append((t_hat.clone(), corr.clone()))
-            return u, corr
+            span = dt - self.CHURN * dt.abs()
+            recorded.append((corr * span).clone())
+            return corr * span
 
+        torch.manual_seed(0)
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS, dtype=torch.float64)
+        x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
         traj, _, weight_hist = steered_reverse_churn_sampling(
-            gmm.velocity,
+            guided_drift,
             sched.transition,
-            self._rho,
+            compensation,
             x0,
             t,
             churn=self.CHURN,
             ess_threshold=self.FINAL_ONLY,
-            guidance=guidance,
+            potential=rho,
         )
-        assert len(recorded) == self.N_STEPS - 1, "guidance must be called once per step"
+        assert len(recorded) == self.N_STEPS - 1, "compensation must be called once per step"
 
-        rho_0 = self._rho(traj[0], t[0])
+        rho_0 = rho(traj[0], t[0])
         accumulated = torch.zeros(self.N_PARTICLES, dtype=torch.float64)
         for i in range(1, self.N_STEPS - 1):
-            t_hat, corr = recorded[i - 1]
-            accumulated = accumulated + corr * (t[i] - t_hat)  # span of the transport half
-            expected = torch.softmax(self._rho(traj[i], t[i]) - rho_0 + accumulated, dim=0)
+            accumulated = accumulated + recorded[i - 1]  # corr·span for that step
+            expected = torch.softmax(rho(traj[i], t[i]) - rho_0 + accumulated, dim=0)
             assert torch.allclose(weight_hist[i], expected, atol=1e-12), (
                 f"step {i}: guided weights do not equal softmax(ρ_i − ρ_0 + Σ corr·span); "
                 f"max deviation {(weight_hist[i] - expected).abs().max():.3e}"
@@ -301,16 +381,53 @@ class TestChurnSteeringFinalResampleOnly:
         """Guard on the premise: if an intermittent resample fired, the identities above
         would hold vacuously on a uniform row."""
         gmm, sched = setup
-        t, x0 = self._grid(), self._x0(gmm)
-        _, _, weight_hist = steered_reverse_churn_sampling(
+
+        def r(x):
+            return -0.5 * (x - self.REWARD_CENTER) ** 2 / self.REWARD_SIGMA**2
+
+        def beta_fn(t_):
+            return 1.0 - t_
+
+        def rho(x, t_):
+            return (beta_fn(t_) * r(x)).squeeze(-1).squeeze(-1)
+
+        torch.manual_seed(0)
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS, dtype=torch.float64)
+        x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
+        traj, _, weight_hist = steered_reverse_churn_sampling(
             gmm.velocity,
             sched.transition,
-            self._rho,
+            None,
             x0,
             t,
             churn=self.CHURN,
             ess_threshold=self.FINAL_ONLY,
+            potential=rho,
         )
+
+        if PLOT:
+            # The weighted cloud is the object the identity is about: with no intermittent
+            # resample the particles themselves stay on the *base* marginal q_t and only the
+            # accumulated weights carry the tilt, so the green histogram tracking the red
+            # curve is the visual form of the closed-form check above.
+            plot_churn_marginal_comparison(
+                runs=[("final resample only", t, traj, weight_hist)],
+                gmm=gmm,
+                beta_fn=beta_fn,
+                reward_fn=lambda x, t_: r(x),
+                time_indices=[15, 30, 45, self.N_STEPS - 1],
+                reward_center=self.REWARD_CENTER,
+                out_dir=_plot_dir(
+                    "test_churn_steering",
+                    "TestChurnSteeringFinalResampleOnly",
+                    "test_weights_are_never_reset_before_the_end",
+                ),
+                title_prefix=(
+                    f"Churn-FKC, weights accumulated over the whole trajectory | BetaSchedule, "
+                    f"churn={self.CHURN}, {self.N_PARTICLES} particles"
+                ),
+            )
+
         uniform = torch.full((self.N_PARTICLES,), 1 / self.N_PARTICLES, dtype=torch.float64)
         for i in range(1, self.N_STEPS - 1):
             assert not torch.allclose(weight_hist[i], uniform, atol=1e-9), f"weights reset at step {i}"
@@ -336,6 +453,7 @@ class TestSteeredChurnGuidedFlow:
     N_PARTICLES = 10_000
     N_STEPS = 500
     REWARD_SIGMA = 1.0
+    CHURN = 1.0
 
     @pytest.fixture
     def setup(self):
@@ -348,9 +466,16 @@ class TestSteeredChurnGuidedFlow:
         )
         return gmm, sched
 
-    def _pieces(self, gmm, sched, reward_center, c, drop_correction=False):
+    @pytest.mark.parametrize("c", [0.25, 0.5, 1.0], ids=lambda v: f"c={v}")
+    @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
+    def test_guided_flow_matches_tilted_intermediate_marginals(self, setup, reward_center, c):
+        gmm, sched = setup
+
         def r(x):
             return -0.5 * (x - reward_center) ** 2 / self.REWARD_SIGMA**2
+
+        def grad_rho(x, t):
+            return -(1.0 - t) * (x - reward_center) / self.REWARD_SIGMA**2
 
         def beta_fn(t):
             return 1.0 - t
@@ -358,55 +483,35 @@ class TestSteeredChurnGuidedFlow:
         def potential(x, t):
             return (beta_fn(t) * r(x)).squeeze(-1).squeeze(-1)
 
-        def guidance(x, t):
+        def guided_drift(x, t):
             g2 = sched.diffusion_coeff(t) ** 2
-            grad_rho = -beta_fn(t) * (x - reward_center) / self.REWARD_SIGMA**2
-            u = c * (g2 / 2) * grad_rho
-            if drop_correction:
-                return u, torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+            return gmm.velocity(x, t) + c * (g2 / 2) * grad_rho(x, t)
+
+        def compensation(x, t, dt):
+            """[∇·u + ⟨s,u⟩]·span, evaluated at the reheated state. The sampler hands us dt
+            for the whole grid step, so recover the transport span as it does: dt − churn·|dt|."""
+            g2 = sched.diffusion_coeff(t) ** 2
             lap_rho = -beta_fn(t) / self.REWARD_SIGMA**2  # D = 1
-            corr = c * (g2 / 2) * (lap_rho + (gmm.score(x, t) * grad_rho).sum(-1).squeeze(-1))
-            return u, corr
+            corr = c * (g2 / 2) * (lap_rho + (gmm.score(x, t) * grad_rho(x, t)).sum(-1).squeeze(-1))
+            return corr * (dt - self.CHURN * dt.abs())
 
-        return r, beta_fn, potential, guidance
-
-    def _run(self, gmm, sched, reward_center, c, resample_at_churn=False, drop_correction=False):
-        _, _, potential, guidance = self._pieces(gmm, sched, reward_center, c, drop_correction)
         torch.manual_seed(0)
         t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
         x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
-        traj, ess, weight_hist = steered_reverse_churn_sampling(
-            gmm.velocity,
+        traj, _, weight_hist = steered_reverse_churn_sampling(
+            guided_drift,
             sched.transition,
-            potential,
+            compensation,
             x0,
             t,
-            churn=1.0,
+            churn=self.CHURN,
             ess_threshold=25,
-            guidance=guidance,
-            resample_at_churn=resample_at_churn,
+            potential=potential,
         )
-        return t, traj, weight_hist
-
-    def _w1_profile(self, gmm, sched, reward_center, t, traj, weight_hist):
-        r, beta_fn, _, _ = self._pieces(gmm, sched, reward_center, 0.0)
-        xs = torch.linspace(-8, 8, 400).reshape(-1, 1, 1)
-        out = []
-        for t_idx in range(10, self.N_STEPS, 10):  # 49 slots
-            p_tilt = _tilted_density(gmm, xs, t[t_idx], beta_fn, lambda x, t__: r(x))
-            w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
-            out.append((t[t_idx], sched.get_sigma_t(t[t_idx]).item(), w1))
-        return out
-
-    @pytest.mark.parametrize("resample_at_churn", [False, True], ids=lambda v: f"churn_resample={v}")
-    @pytest.mark.parametrize("c", [0.25, 0.5, 1.0], ids=lambda v: f"c={v}")
-    @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
-    def test_guided_flow_matches_tilted_intermediate_marginals(self, setup, reward_center, c, resample_at_churn):
-        gmm, sched = setup
-        t, traj, weight_hist = self._run(gmm, sched, reward_center, c, resample_at_churn)
+        assert traj.shape == (self.N_STEPS, self.N_PARTICLES, 1, 1)
+        assert weight_hist.shape == (self.N_STEPS, self.N_PARTICLES)
 
         if PLOT:
-            r, beta_fn, _, _ = self._pieces(gmm, sched, reward_center, c)
             plot_churn_marginal_comparison(
                 runs=[(f"guided c={c}", t, traj, weight_hist)],
                 gmm=gmm,
@@ -414,22 +519,23 @@ class TestSteeredChurnGuidedFlow:
                 reward_fn=lambda x, t__: r(x),
                 time_indices=[100, 250, 400, self.N_STEPS - 1],
                 reward_center=reward_center,
-                out_path=(
-                    _plot_dir("test_guided_flow_matches_tilted_intermediate_marginals")
-                    / f"guided_c{c}_center{reward_center}_churnresample{resample_at_churn}.png"
+                out_dir=_plot_dir(
+                    "test_churn_steering",
+                    "TestSteeredChurnGuidedFlow",
+                    "test_guided_flow_matches_tilted_intermediate_marginals",
+                    f"center{reward_center}",
                 ),
-                suptitle=(
-                    f"Guided churn-FKC — BetaSchedule, churn=1.0, c={c}, "
-                    f"reward center={reward_center}, churn-half resample={resample_at_churn}"
-                ),
+                title_prefix=f"Guided churn-FKC | BetaSchedule, churn=1.0, c={c}, reward center={reward_center}",
             )
 
-        for t_, sigma_t, w1 in self._w1_profile(gmm, sched, reward_center, t, traj, weight_hist):
-            tol = 0.05 * (1.0 + sigma_t)
-            assert w1 < tol, (
-                f"guided c={c} center={reward_center} churn_resample={resample_at_churn} "
-                f"t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
-            )
+        xs = torch.linspace(-8, 8, 400).reshape(-1, 1, 1)
+        for t_idx in range(10, self.N_STEPS, 10):  # 49 intermediate slots
+            t_ = t[t_idx]
+            sigma_t = sched.get_sigma_t(t_)
+            p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: r(x))
+            w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
+            tol = 0.05 * (1.0 + sigma_t.item())
+            assert w1 < tol, f"guided c={c} center={reward_center} t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
 
     @pytest.mark.parametrize("c", [0.5, 1.0], ids=lambda v: f"c={v}")
     def test_dropping_the_compensation_breaks_the_marginals(self, setup, c):
@@ -440,31 +546,78 @@ class TestSteeredChurnGuidedFlow:
         Deleting the term must therefore make W1 much worse, not marginally worse.
         """
         gmm, sched = setup
-        t_ok, traj_ok, w_ok = self._run(gmm, sched, -2.0, c)
-        t_bad, traj_bad, w_bad = self._run(gmm, sched, -2.0, c, drop_correction=True)
-        prof_ok = self._w1_profile(gmm, sched, -2.0, t_ok, traj_ok, w_ok)
-        prof_bad = self._w1_profile(gmm, sched, -2.0, t_bad, traj_bad, w_bad)
-        mean_ok = sum(w for _, _, w in prof_ok) / len(prof_ok)
-        mean_bad = sum(w for _, _, w in prof_bad) / len(prof_bad)
+        reward_center = -2.0
+
+        def r(x):
+            return -0.5 * (x - reward_center) ** 2 / self.REWARD_SIGMA**2
+
+        def grad_rho(x, t):
+            return -(1.0 - t) * (x - reward_center) / self.REWARD_SIGMA**2
+
+        def beta_fn(t):
+            return 1.0 - t
+
+        def potential(x, t):
+            return (beta_fn(t) * r(x)).squeeze(-1).squeeze(-1)
+
+        def guided_drift(x, t):
+            g2 = sched.diffusion_coeff(t) ** 2
+            return gmm.velocity(x, t) + c * (g2 / 2) * grad_rho(x, t)
+
+        def compensation(x, t, dt):
+            g2 = sched.diffusion_coeff(t) ** 2
+            lap_rho = -beta_fn(t) / self.REWARD_SIGMA**2  # D = 1
+            corr = c * (g2 / 2) * (lap_rho + (gmm.score(x, t) * grad_rho(x, t)).sum(-1).squeeze(-1))
+            return corr * (dt - self.CHURN * dt.abs())
+
+        def no_compensation(x, t, dt):
+            return torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+
+        xs = torch.linspace(-8, 8, 400).reshape(-1, 1, 1)
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
+
+        def run(weight_update):
+            torch.manual_seed(0)
+            x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
+            traj, _, weight_hist = steered_reverse_churn_sampling(
+                guided_drift,
+                sched.transition,
+                weight_update,
+                x0,
+                t,
+                churn=self.CHURN,
+                ess_threshold=25,
+                potential=potential,
+            )
+            w1s = []
+            for t_idx in range(10, self.N_STEPS, 10):
+                p_tilt = _tilted_density(gmm, xs, t[t_idx], beta_fn, lambda x, t__: r(x))
+                w1s.append(_weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt))
+            return traj, weight_hist, sum(w1s) / len(w1s), len(w1s)
+
+        traj_ok, w_ok, mean_ok, n_slots = run(compensation)
+        traj_bad, w_bad, mean_bad, _ = run(no_compensation)
 
         if PLOT:
-            r, beta_fn, _, _ = self._pieces(gmm, sched, -2.0, c)
             plot_churn_marginal_comparison(
                 runs=[
-                    (f"guided c={c}, compensation ON", t_ok, traj_ok, w_ok),
-                    (f"guided c={c}, compensation OFF", t_bad, traj_bad, w_bad),
+                    (f"guided c={c}, compensation ON", t, traj_ok, w_ok),
+                    (f"guided c={c}, compensation OFF", t, traj_bad, w_bad),
                 ],
                 gmm=gmm,
                 beta_fn=beta_fn,
                 reward_fn=lambda x, t__: r(x),
                 time_indices=[100, 250, 400, self.N_STEPS - 1],
-                reward_center=-2.0,
-                out_path=(
-                    _plot_dir("test_dropping_the_compensation_breaks_the_marginals") / f"compensation_ablation_c{c}.png"
+                reward_center=reward_center,
+                out_dir=_plot_dir(
+                    "test_churn_steering",
+                    "TestSteeredChurnGuidedFlow",
+                    "test_dropping_the_compensation_breaks_the_marginals",
+                    f"c{c}",
                 ),
-                suptitle=(
-                    f"Guidance compensation ∇·u + ⟨s,u⟩ ablation — u = {c}·(g²/2)·∇ρ\n"
-                    f"mean W1 over {len(prof_ok)} slots: {mean_ok:.4f} with it, {mean_bad:.4f} without"
+                title_prefix=(
+                    f"Guidance compensation ∇·u + ⟨s,u⟩ ablation | u = {c}·(g²/2)·∇ρ | "
+                    f"mean W1 over {n_slots} slots: {mean_ok:.4f} with it, {mean_bad:.4f} without"
                 ),
             )
 
@@ -519,7 +672,7 @@ class TestSteeredChurnBetaIntermediateMarginals:
         t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
         x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
         traj, ess_hist, weight_hist = steered_reverse_churn_sampling(
-            gmm.velocity, sched.transition, potential, x0, t, churn=churn, ess_threshold=ess_threshold
+            gmm.velocity, sched.transition, None, x0, t, churn=churn, ess_threshold=ess_threshold, potential=potential
         )
         assert traj.shape == (self.N_STEPS, self.N_PARTICLES, 1, 1)
         assert weight_hist.shape == (self.N_STEPS, self.N_PARTICLES)
@@ -587,7 +740,7 @@ class TestSteeredChurnKarrasIntermediateMarginals:
         t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
         x0 = gmm.sample(shape=self.N_PARTICLES, t=self.T_NOISE)
         traj, _, weight_hist = steered_reverse_churn_sampling(
-            gmm.velocity, sched.transition, potential, x0, t, churn=churn, ess_threshold=ess_threshold
+            gmm.velocity, sched.transition, None, x0, t, churn=churn, ess_threshold=ess_threshold, potential=potential
         )
         assert traj.shape == (self.N_STEPS, self.N_PARTICLES, 1, 1)
 
@@ -603,6 +756,36 @@ class TestSteeredChurnKarrasIntermediateMarginals:
                 f"KarrasSchedule churn={churn} center={reward_center} ess={ess_threshold} "
                 f"t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
             )
+
+        if PLOT:
+            # Regular slices across the reverse pass, plus the last two. The mandatory final
+            # resample fires only at index N_STEPS-1, so the penultimate panel shows the tilt
+            # still living in the *weights* (unweighted histogram off the target, weighted on
+            # it) while the final panel shows the two coinciding after the gather.
+            for t_idx in [*range(50, self.N_STEPS, 100), self.N_STEPS - 2, self.N_STEPS - 1]:
+                # Grid tracks sigma_t exactly as the W1 loop above does, so the high-noise
+                # panels are not truncated.
+                grid_radius = max(4.0, 6.0 * sched.get_sigma_t(t[t_idx]).item())
+                plot_churn_marginal_comparison(
+                    runs=[(f"churn={churn}", t, traj, weight_hist)],
+                    gmm=gmm,
+                    beta_fn=beta_fn,
+                    reward_fn=lambda x, t__: r(x),
+                    time_indices=[t_idx],
+                    reward_center=reward_center,
+                    out_dir=_plot_dir(
+                        "test_churn_steering",
+                        "TestSteeredChurnKarrasIntermediateMarginals",
+                        "test_weighted_karras_churn_matches_tilted_intermediate_marginals",
+                        f"center{reward_center}",
+                        f"ess{ess_threshold}",
+                    ),
+                    title_prefix=(
+                        f"Churn-FKC | KarrasSchedule, direct reward r(x_t), churn={churn}, "
+                        f"ess={ess_threshold}, center={reward_center}"
+                    ),
+                    grid_radius=grid_radius,
+                )
 
 
 @pytest.mark.slow
@@ -638,10 +821,11 @@ class TestSteeredChurnDenoisingKarras(KarrasDenoiseMixin):
     @pytest.mark.parametrize("reward_center", [-1.0, -0.5, 0.5], ids=lambda v: f"center={v}")
     @pytest.mark.parametrize("n_denoise_steps", [10], ids=lambda v: f"{v}")
     def test_weighted_denoising_karras_churn_matches_tilted_marginals(
-        self, setup, reward_center, ess_threshold, n_denoise_steps, churn=1.0
+        self, setup, reward_center, ess_threshold, n_denoise_steps
     ):
         gmm, sched = setup
         reward_sigma = 1.0
+        churn = 1.0
 
         def r(x0_hat):
             return -0.5 * (x0_hat - reward_center) ** 2 / reward_sigma**2
@@ -660,7 +844,7 @@ class TestSteeredChurnDenoisingKarras(KarrasDenoiseMixin):
         t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
         x0 = gmm.sample(shape=self.N_PARTICLES, t=self.T_NOISE)
         traj, _, weight_hist = steered_reverse_churn_sampling(
-            gmm.velocity, sched.transition, potential, x0, t, churn=churn, ess_threshold=ess_threshold
+            gmm.velocity, sched.transition, None, x0, t, churn=churn, ess_threshold=ess_threshold, potential=potential
         )
         assert traj.shape == (self.N_STEPS, self.N_PARTICLES, 1, 1)
 
@@ -678,6 +862,36 @@ class TestSteeredChurnDenoisingKarras(KarrasDenoiseMixin):
                 f"Karras denoising churn={churn} center={reward_center} ess={ess_threshold} "
                 f"t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
             )
+
+        if PLOT:
+            # Regular slices across the reverse pass, plus the last two. The mandatory final
+            # resample fires only at index N_STEPS-1, so the penultimate panel shows the tilt
+            # still living in the *weights* (unweighted histogram off the target, weighted on
+            # it) while the final panel shows the two coinciding after the gather.
+            for t_idx in [*range(50, self.N_STEPS, 100), self.N_STEPS - 2, self.N_STEPS - 1]:
+                # Grid tracks sigma_t exactly as the W1 loop above does, so the high-noise
+                # panels are not truncated.
+                grid_radius = max(4.0, 6.0 * sched.get_sigma_t(t[t_idx]).item())
+                plot_churn_marginal_comparison(
+                    runs=[(f"churn={churn}", t, traj, weight_hist)],
+                    gmm=gmm,
+                    beta_fn=beta_fn,
+                    reward_fn=reward_on,
+                    time_indices=[t_idx],
+                    reward_center=reward_center,
+                    out_dir=_plot_dir(
+                        "test_churn_steering",
+                        "TestSteeredChurnDenoisingKarras",
+                        "test_weighted_denoising_karras_churn_matches_tilted_marginals",
+                        f"center{reward_center}",
+                        f"ess{ess_threshold}",
+                    ),
+                    title_prefix=(
+                        f"Churn-FKC | KarrasSchedule, denoised reward r(D(x_t,t)), churn={churn}, "
+                        f"ess={ess_threshold}, center={reward_center}"
+                    ),
+                    grid_radius=grid_radius,
+                )
 
         # Terminal marginal: the headline number, directly comparable to the EM sampler's
         # `assert w1_rew < 0.075` in TestSteeredSamplingKarrasFinalMarginal.
@@ -700,7 +914,11 @@ class TestSteeredChurnDenoisingKarras(KarrasDenoiseMixin):
                     f"churn={churn}, ess={ess_threshold}, center={reward_center} | W1={w1_terminal:.4f}"
                 ),
                 out_path=(
-                    _plot_dir("test_weighted_denoising_karras_churn_matches_tilted_marginals")
+                    _plot_dir(
+                        "test_churn_steering",
+                        "TestSteeredChurnDenoisingKarras",
+                        "test_weighted_denoising_karras_churn_matches_tilted_marginals",
+                    )
                     / f"churn{churn}_center{reward_center}_ess{ess_threshold}.png"
                 ),
                 min_x=-3,
@@ -718,70 +936,139 @@ def plot_churn_marginal_comparison(
     reward_fn,
     time_indices,
     reward_center,
-    out_path,
-    suptitle,
+    out_dir,
+    title_prefix,
     grid_radius=8.0,
     n_grid=400,
-    n_hist_bins=80,
 ):
-    """Grid of density comparisons for one or more churn-steered runs.
+    """Save one `plot_marginal_density_comparison` panel per (run, time index).
 
-    One row per run, one column per time index. Each panel overlays the base marginal
-    q_t, the analytic tilted target pi_t ∝ q_t·exp(rho_t), and the *weighted* empirical
-    density of the particles — weighted because SMC particles are only correct as a
-    weighted cloud, so an unweighted histogram is expected to be wrong between resamples
-    (see tests/CLAUDE.md). Each panel is titled with its weighted W1, so a row that drifts
-    off the red curve is visible both by eye and by number.
-
-    Pass several runs to compare steering variants against a shared target — guided vs
-    unguided, or with vs without the guidance compensation.
+    Thin loop over test_steering.py's shared plotter — base q_t, analytic tilted pi_t,
+    and both the unweighted and weighted empirical densities — so the churn plots look
+    exactly like the Euler-Maruyama ones. Weighted matters: SMC particles are only
+    correct as a weighted cloud, so between resamples the unweighted histogram is
+    expected to be wrong (see tests/CLAUDE.md).
 
     Args:
-        runs:          [(label, t, trajectory, weight_history)], one entry per row.
-        gmm, beta_fn:  used to build the analytic curves; reward_fn is (x, t) -> reward.
-        reward_fn:     (x, t) -> [*, 1, 1] reward on the grid, matching `_tilted_density`.
-        time_indices:  trajectory indices to show, one per column.
+        runs:          [(label, t, trajectory, weight_history)]; label goes in the filename.
+        gmm, beta_fn:  build the analytic curves; reward_fn is (x, t) -> reward.
+        time_indices:  trajectory indices to plot, one PNG each.
         reward_center: drawn as a vertical marker.
-        out_path:      PNG destination; parent directories are created.
-        suptitle:      figure-level title.
+        out_dir:       directory for the PNGs; created if missing.
+        title_prefix:  first title line, shared across panels.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    xs = torch.linspace(-grid_radius, grid_radius, n_grid).reshape(-1, 1, 1)
+    dtype = runs[0][2].dtype  # the trajectory's dtype; some runs are float64
+    xs = torch.linspace(-grid_radius, grid_radius, n_grid, dtype=dtype).reshape(-1, 1, 1)
     xs_flat = xs.squeeze()
-    edges = torch.linspace(-grid_radius, grid_radius, n_hist_bins + 1)
 
-    fig, axes = plt.subplots(
-        len(runs), len(time_indices), figsize=(4.6 * len(time_indices), 3.1 * len(runs)), squeeze=False, sharex=True
-    )
-    for row, (label, t, traj, weight_hist) in enumerate(runs):
-        for col, t_idx in enumerate(time_indices):
-            ax = axes[row][col]
+    for label, t, traj, weight_hist in runs:
+        for t_idx in time_indices:
             t_ = t[t_idx]
-
             p_base = gmm.log_prob(xs, t=t_).squeeze().exp()
             p_base = p_base / torch.trapezoid(p_base, xs_flat)
             p_tilt = _tilted_density(gmm, xs, t_, beta_fn, reward_fn)
             w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs_flat, p_tilt)
-            hist, _ = torch.histogram(traj[t_idx, :, 0, 0], bins=edges, weight=weight_hist[t_idx], density=True)
+            slug = label.replace(" ", "").replace(",", "_").replace("=", "")
+            plot_marginal_density_comparison(
+                xs_flat=xs_flat,
+                p_data=p_base,
+                p_rew=p_tilt,
+                samples=traj[t_idx, :, 0, 0],
+                weights=weight_hist[t_idx],
+                reward_center=reward_center,
+                title=f"{title_prefix}\n{label} | t_idx={t_idx}, t={t_:.3f} | weighted W1={w1:.4f}",
+                out_path=Path(out_dir) / f"{slug}_t{t_idx}.png",
+                min_x=-grid_radius,
+                max_x=grid_radius,
+            )
 
-            ax.plot(xs_flat, p_base, color="steelblue", ls=":", lw=2, label="base $q_t$")
-            ax.plot(xs_flat, p_tilt, color="firebrick", lw=2.4, label=r"analytic tilted $\pi_t$")
-            ax.stairs(hist, edges, color="seagreen", fill=True, alpha=0.4, label="steered (weighted)")
-            ax.axvline(reward_center, color="firebrick", ls="--", lw=0.9)
-            ax.set_title(f"t={t_:.3f}   W1={w1:.4f}", fontsize=10)
-            ax.grid(alpha=0.2)
-            if col == 0:
-                ax.set_ylabel(label.replace(", ", "\n"), fontsize=9)
-            if row == 0 and col == 0:
-                ax.legend(fontsize=8)
 
-    fig.suptitle(suptitle, fontsize=12)
-    fig.tight_layout()
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=125, bbox_inches="tight")
-    plt.close(fig)
+@pytest.mark.slow
+class TestChurnSteeringWithEulerMaruyamaWeight:
+    """The Euler-Maruyama FKC weight, reused verbatim on the churn sampler.
+
+    This is what the `(drift, transition, weight_update)` signature buys: `weight_update`
+    means the same thing here as in `steered_reverse_sampling`, so the *same closure*
+    steers both samplers. It is also an empirical check on the κ-invariance derived in
+    `docs/fkc_churn_steering.md` §7 — redoing Prop. D.6 Step 5 with the churn's effective
+    generator (b_κ, g_κ) leaves the weight equal to Eq. (276) with the base g², carrying no
+    κ at all. If that were wrong, sweeping churn here would walk off the tilted marginals.
+
+    Only the *drift* carries κ. The churn sampler transports over −(1+κ)|dt| rather than
+    −|dt|, so a guidance field must be divided by (1+κ) to land the same displacement per
+    grid step, and the base transport is the probability-flow velocity rather than the
+    reverse-SDE drift, since the churn supplies the stochasticity.
+    """
+
+    EPS = 0.001
+    N_PARTICLES = 10_000
+    N_STEPS = 500
+    REWARD_SIGMA = 1.0
+
+    @pytest.fixture
+    def setup(self):
+        sched = BetaSchedule(beta_min=0.1, beta_max=20.0)
+        gmm = GMM(
+            mu=torch.tensor([[[-2.5], [2.5]]]),
+            sigma=torch.tensor([[[0.8], [0.8]]]),
+            weight=torch.tensor([[0.2, 0.8]]),
+            schedule=sched,
+        )
+        return gmm, sched
+
+    @pytest.mark.parametrize("churn", [0.5, 1.0, 2.0], ids=lambda v: f"churn={v}")
+    @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
+    def test_em_weight_update_steers_the_churn_sampler(self, setup, reward_center, churn):
+        gmm, sched = setup
+
+        def r(x):
+            return -0.5 * (x - reward_center) ** 2 / self.REWARD_SIGMA**2
+
+        def grad_r(x):
+            return -(x - reward_center) / self.REWARD_SIGMA**2
+
+        def beta_fn(t):
+            return 1.0 - t
+
+        # Byte-for-byte the fkc_weight_update of test_steering.py -- no churn anywhere in it.
+        def fkc_weight_update(x, t, dt):
+            f = sched.forward_drift(x, t)
+            sigma = sched.diffusion_coeff(t)
+            score = gmm.score(x, t)
+            rg, rv = grad_r(x), r(x)
+            beta = beta_fn(t)
+            term1 = -_dbeta_dt(beta_fn, t) * rv
+            term2 = -(beta * rg) * f
+            term3 = (beta * rg) * (sigma**2 / 2) * score
+            return (term1 + term2 + term3).squeeze(-1).squeeze(-1) * dt.abs()
+
+        def guided_drift(x, t):
+            """PF velocity (the churn supplies the noise) plus the D.6 guidance field.
+
+            Two churn-dependent factors, and both are load-bearing. The magic constant is
+            built from the *effective* diffusion g_κ² = κ·g², not from g² — a = β·κ·g²/2,
+            per §7 — and the field is divided by (1+κ) because the transport spans
+            −(1+κ)|dt| rather than −|dt|. They coincide only at κ=1, which is precisely
+            why an implementation missing the κ in `a` passes at churn=1 and fails either
+            side of it.
+            """
+            g2 = sched.diffusion_coeff(t) ** 2
+            a = beta_fn(t) * churn * g2 / 2
+            return gmm.velocity(x, t) - a * grad_r(x) / (1.0 + churn)
+
+        torch.manual_seed(0)
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
+        x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
+        traj, _, weight_hist = steered_reverse_churn_sampling(
+            guided_drift, sched.transition, fkc_weight_update, x0, t, churn=churn, ess_threshold=25
+        )
+
+        xs = torch.linspace(-8, 8, 400).reshape(-1, 1, 1)
+        for t_idx in range(10, self.N_STEPS, 10):  # 49 slots
+            t_ = t[t_idx]
+            p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: r(x))
+            w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
+            tol = 0.05 * (1.0 + sched.get_sigma_t(t_).item())
+            assert w1 < tol, (
+                f"EM weight on churn sampler, churn={churn} center={reward_center} t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
+            )

@@ -14,8 +14,9 @@ PLOT = True  # flip to True locally to save FKC steering diagnostic plots next t
 PLOT_DIR = Path(__file__).parent / "plots"
 
 
-def _plot_dir(test_function):
-    return PLOT_DIR / test_function
+def _plot_dir(*parts):
+    """plots/<test_file>/<TestClass>/<test_function>/... — one directory per test node."""
+    return PLOT_DIR.joinpath(*parts)
 
 
 def _wasserstein1(samples, xs_grid, p):
@@ -317,7 +318,7 @@ class TestSteeredSamplingBetaFinalMarginal:
                 reward_sigma=reward_sigma,
                 ess_threshold=ess_threshold,
                 n_steps=self.N_STEPS,
-                out_path=_plot_dir("test_steered_sampling")
+                out_path=_plot_dir("test_steering", "TestSteeredSamplingBetaFinalMarginal", "test_steered_sampling")
                 / f"steered_center{reward_center}_sigma{reward_sigma}_ess{ess_threshold}.png",
             )
         # Bound reflects the statistic's measured spread, not just its centre. Over 6 seeds
@@ -519,7 +520,9 @@ class TestSteeredSamplingKarrasFinalMarginal(KarrasDenoiseMixin):
                 reward_sigma=reward_sigma,
                 ess_threshold=ess_threshold,
                 n_steps=self.N_STEPS,
-                out_path=_plot_dir("test_steered_sampling_karras")
+                out_path=_plot_dir(
+                    "test_steering", "TestSteeredSamplingKarrasFinalMarginal", "test_steered_sampling_karras"
+                )
                 / f"steered_karras_center{reward_center}_ess{ess_threshold}.png",
             )
         assert w1_rew < 0.075, (
@@ -622,7 +625,10 @@ class TestSteeredSamplingBetaIntermediateMarginals:
                     ),
                     out_path=(
                         _plot_dir(
-                            f"test_weighted_beta_reverse_trajectory_matches_tilted_intermediate_marginals/center{reward_center}/"
+                            "test_steering",
+                            "TestSteeredSamplingBetaIntermediateMarginals",
+                            "test_weighted_beta_reverse_trajectory_matches_tilted_intermediate_marginals",
+                            f"center{reward_center}",
                         )
                         / f"beta_intermediate_t{t_idx}_center{reward_center}_resample{resample_every}.png"
                     ),
@@ -730,8 +736,11 @@ class TestSteeredSamplingKarrasIntermediateMarginals:
                     ),
                     out_path=(
                         _plot_dir(
-                            f"test_weighted_karras_reverse_trajectory_matches_tilted_intermediate_marginals/"
-                            f"center{reward_center}/ess{ess_threshold}/"
+                            "test_steering",
+                            "TestSteeredSamplingKarrasIntermediateMarginals",
+                            "test_weighted_karras_reverse_trajectory_matches_tilted_intermediate_marginals",
+                            f"center{reward_center}",
+                            f"ess{ess_threshold}",
                         )
                         / f"karras_intermediate_t{t_idx}_center{reward_center}_resample{ess_threshold}.png"
                     ),
@@ -754,8 +763,11 @@ class TestSteeredSamplingKarrasIntermediateMarginals:
                 title=f"KarrasSchedule steered reverse trajectories | reward_center={reward_center}",
                 out_path=(
                     _plot_dir(
-                        f"test_weighted_karras_reverse_trajectory_matches_tilted_intermediate_marginals/"
-                        f"center{reward_center}/ess{ess_threshold}/"
+                        "test_steering",
+                        "TestSteeredSamplingKarrasIntermediateMarginals",
+                        "test_weighted_karras_reverse_trajectory_matches_tilted_intermediate_marginals",
+                        f"center{reward_center}",
+                        f"ess{ess_threshold}",
                     )
                     / f"karras_trajectories_center{reward_center}_resample{ess_threshold}.png"
                 ),
@@ -869,8 +881,11 @@ class TestSteeredSamplingDenoisingKarrasIntermediateMarginals(KarrasDenoiseMixin
                     ),
                     out_path=(
                         _plot_dir(
-                            f"test_weighted_denoising_karras_reverse_trajectory_matches_tilted_intermediate_marginals/"
-                            f"center{reward_center}/ess{ess_threshold}/"
+                            "test_steering",
+                            "TestSteeredSamplingDenoisingKarrasIntermediateMarginals",
+                            "test_weighted_denoising_karras_reverse_trajectory_matches_tilted_intermediate_marginals",
+                            f"center{reward_center}",
+                            f"ess{ess_threshold}",
                         )
                         / f"karras_denoising_intermediate_t{t_idx}_center{reward_center}_resample{ess_threshold}.png"
                     ),
@@ -893,8 +908,11 @@ class TestSteeredSamplingDenoisingKarrasIntermediateMarginals(KarrasDenoiseMixin
                 title=f"KarrasSchedule denoising steered reverse trajectories | reward_center={reward_center}",
                 out_path=(
                     _plot_dir(
-                        f"test_weighted_denoising_karras_reverse_trajectory_matches_tilted_intermediate_marginals/"
-                        f"center{reward_center}/ess{ess_threshold}/"
+                        "test_steering",
+                        "TestSteeredSamplingDenoisingKarrasIntermediateMarginals",
+                        "test_weighted_denoising_karras_reverse_trajectory_matches_tilted_intermediate_marginals",
+                        f"center{reward_center}",
+                        f"ess{ess_threshold}",
                     )
                     / f"karras_denoising_trajectories_center{reward_center}_resample{ess_threshold}.png"
                 ),
@@ -1011,7 +1029,11 @@ class TestSteeredSamplingIntermediateMarginals(KarrasDenoiseMixin):
                         w1=w1_tilt,
                     ),
                     out_path=(
-                        _plot_dir("test_steered_sampling_karras_denoised_reward_intermediate_marginals")
+                        _plot_dir(
+                            "test_steering",
+                            "TestSteeredSamplingIntermediateMarginals",
+                            "test_steered_sampling_karras_denoised_reward_intermediate_marginals",
+                        )
                         / f"karras_denoised_intermediate_t{t_idx}_center{reward_center}_resample{resample_every}.png"
                     ),
                     min_x=-plot_radius,
@@ -1114,7 +1136,11 @@ class TestSteeredSamplingIntermediateMarginals(KarrasDenoiseMixin):
                         w1=w1_tilt,
                     ),
                     out_path=(
-                        _plot_dir("test_steered_sampling_karras_direct_noisy_reward_intermediate_marginals")
+                        _plot_dir(
+                            "test_steering",
+                            "TestSteeredSamplingIntermediateMarginals",
+                            "test_steered_sampling_karras_direct_noisy_reward_intermediate_marginals",
+                        )
                         / f"karras_direct_intermediate_t{t_idx}_center{reward_center}_resample{resample_every}.png"
                     ),
                 )

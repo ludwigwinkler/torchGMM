@@ -112,7 +112,7 @@ def reverse_churn_sampling(
 
     The velocity is evaluated at the *reheated* time t+h, not at t: after the churn the
     state is distributed according to p_{t+h}, so the score at t is the wrong one for it
-    (docs/fkc_churn_steering.md §5). Both are O(h) globally, but the mismatch is a full
+    (docs/fkc_churn_steering.md §3.1). Both are O(h) globally, but the mismatch is a full
     step wide at churn=1 and costs measurable accuracy at low step counts.
 
     Both preserve the marginal family, so the composition lands on p_{t+dt}. Contrast
@@ -261,89 +261,85 @@ def steered_reverse_sampling(
 
 @jaxtyped(typechecker=beartype)
 def steered_reverse_churn_sampling(
-    velocity: Callable,
+    drift: Callable,
     transition: Callable,
-    potential: Callable,
+    weight_update: Callable | None,
     x: Float[Tensor, "N *rest D"],
     t: Float[Tensor, " T"],
     churn: float = 1.0,
     ess_threshold: float | int = 0.5,
-    guidance: Callable | None = None,
-    resample_at_churn: bool = False,
+    potential: Callable | None = None,
 ) -> tuple[Float[Tensor, "T N *rest D"], list[float], Float[Tensor, "T N"]]:
     """FKC-steered churn sampling: `reverse_churn_sampling` run as an SMC particle filter.
 
-    Same splitting as `reverse_churn_sampling` — exact forward re-noise to t̂, then
-    probability-flow transport from t̂ to t+dt — with importance weights and systematic
-    resampling layered on top, exactly as `steered_reverse_sampling` layers them onto
-    Euler-Maruyama. Targets the tilted marginals p_t(x) ∝ q_t(x)·exp(ρ_t(x)).
+    The signature mirrors `steered_reverse_sampling` one-for-one, with `transition` in
+    place of `diffusion`: in a churn step the stochasticity comes from re-noising with the
+    exact forward kernel rather than from an additive Brownian increment, so that is the
+    slot it occupies. Everything else — the `ess_threshold` contract, the
+    `(trajectory, ess_history, weight_history)` return — is identical.
 
-    Where `steered_reverse_sampling` takes an *incremental* `weight_update(x, t, dt)`,
-    this takes the tilt exponent ρ_t(x) itself, because the churn step is a discrete
-    proposal kernel rather than an SDE discretisation (docs/fkc_churn_steering.md §2-3).
-    Since the base churn kernel already maps q_t onto q_{t+dt} exactly, the whole
-    importance correction is the endpoint difference
+    Each step re-noises to t̂ with `transition`, then transports `drift` from t̂ to t+dt.
+    Both operators preserve the marginal family, so the composition lands on p_{t+dt};
+    the SMC layer then retargets it onto p_t(x) ∝ q_t(x)·exp(ρ_t(x)).
 
-        Δlog w = ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t)
+    **Guidance is the caller's, not the sampler's.** `drift` is the probability-flow
+    velocity, and a reward-guided flow is simply that velocity plus a guidance field —
+    built by the caller exactly as `guided_drift` is built for `steered_reverse_sampling`.
+    The sampler never needs to know which part is guidance, because whatever compensation
+    the guidance requires belongs in `weight_update`, which the caller also owns.
 
-    which retargets the pushforward of the old tilted cloud onto the new one. Nothing
-    else is needed: no β̇_t, no ∂_t r, no reward Laplacian, no score-alignment inner
-    product — all of which the continuous-time weight of Proposition D.6 requires.
+    **Two ways to weight.** They are different Feynman-Kac factorisations; supply either,
+    or both, in which case their increments simply add. At least one is required.
 
-    The increments telescope, so between resamples log w is bounded by the range of ρ
-    rather than accumulating like a stochastic integral.
+    `weight_update(x, t, dt) -> [N]` is the continuous-time route, identical in form and
+    meaning to `steered_reverse_sampling`'s. It is evaluated at the *reheated* pair (x̂, t̂),
+    since that is where the transport starts and where the score is taken. The churn
+    splitting's continuous limit is the standard λ-family reverse SDE at λ=√churn, and the
+    Prop. D.6 weight for that generator is **independent of churn** (see
+    `docs/fkc_churn_steering.md` §7) — so the very same `fkc_weight_update` closure works
+    here and in `steered_reverse_sampling`, at any churn strength. Exact in the limit of a
+    fine grid, like any SDE discretisation.
 
-    **Split weighting.** The step is two operators, so the increment splits at the
-    reheated state and the halves telescope back to the whole:
+    `potential(x, t) -> [N]` is the discrete route, native to the splitting: because the
+    churn kernel already maps q_t onto q_{t+dt} exactly, the entire correction is the
+    endpoint difference
 
-        Δlog w_churn = ρ_t̂(x̂) − ρ_t(x)          (exact: the kernel maps q_t onto q_t̂)
-        Δlog w_ODE   = ρ_{t+dt}(x_{t+dt}) − ρ_t̂(x̂)
+        Δlog w = ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t),
 
-    `resample_at_churn` makes that split explicit and tests ESS after the churn half too,
-    so particles can be selected at the reheated noise level where diversity is highest.
-    It costs one extra `potential` evaluation per step; with it False the two halves are
-    accumulated as the single telescoped difference above and ρ_t̂(x̂) is never evaluated.
+    with no β̇_t, no ∂_t r, no reward Laplacian, no score-alignment term and no reward
+    gradient at all — so a denoiser inside `potential` is never backpropagated through.
+    This is exact at finite step size rather than only in the limit, and ρ is carried
+    across steps and gathered on a resample, so it costs one evaluation per step. Its
+    increments telescope, so between resamples log w stays bounded by the range of ρ.
+    A guided `drift` still needs its compensation ∇·u + ⟨s_t,u⟩ — the endpoint difference
+    alone is exact only for an unguided flow. Supply it through `weight_update` alongside
+    `potential`; the transport span it multiplies is `dt − churn·|dt|`, recoverable from
+    the `dt` the callable receives. A deterministic half has no diffusion term, so unlike
+    Prop. D.6 the reward Laplacian in ∇·u does *not* cancel and has to be carried.
 
-    **Guided flow.** With `guidance` supplied the deterministic half integrates
-    `velocity + u` instead of `velocity`, moving part of the tilt out of the weights and
-    into the dynamics. A deterministic half has no diffusion term, so unlike Prop. D.6
-    the reward Laplacian does *not* cancel; the exact compensation is
-
-        Δlog w_ODE = ρ_{t+dt}(x_{t+dt}) − ρ_t̂(x̂) + [∇·u + ⟨s_t, u⟩]·(t+dt − t̂)
-
-    where ∇·u + ⟨s_t,u⟩ = (1/q)∇·(q u) is the compressibility of the guidance field
-    against the base marginal. This is exact for *any* field u and any span — u is a free
-    knob trading weight variance for drift, exactly as `a` is in Prop. D.6 — so it does
-    not have to match the D.6 magic constant. u = 0 recovers the plain endpoint form.
+    Weighting and resampling happen once per integration step, after both halves: the
+    churn kernel maps q_t onto q_t̂ exactly, so the churn half carries no weight of its own
+    beyond what the endpoint difference already accounts for.
 
     Args:
-        velocity:      (x, t) -> [N, *rest, D]; probability-flow velocity, e.g. `gmm.velocity`.
-                       NOT a reward-guided drift — the weights carry the whole tilt.
+        drift:         (x, t) -> [N, *rest, D]; the probability-flow velocity, e.g.
+                       `gmm.velocity`, plus any guidance field the caller wants. NOT the
+                       reverse-SDE drift f − g²s — the churn supplies the stochasticity,
+                       so a score-corrected drift double-counts it.
         transition:    (x, t, s) -> [N, *rest, D]; exact forward kernel, i.e. `schedule.transition`
-        potential:     (x, t) -> [N]; the log tilt ρ_t(x) = β(t)·r(x, t). Returns one scalar
-                       per particle, already reduced over `*rest` and `D`.
+        weight_update: (x, t, dt) -> [N] incremental log weight, evaluated at the reheated
+                       pair (x̂, t̂). Pass None to weight by `potential` instead.
         x:             [N, *rest, D] initial state; N = number of particles
         t:             1D strictly decreasing time grid in [0, 1], >= 2 points
         churn:         Churn strength as a multiple of the step size, h = churn·|dt|; see
                        `reverse_churn_sampling`. 0 makes every step a deterministic PF-ODE
-                       step, and the weights then reduce to a pure change-of-target term.
+                       step and the churn contributes no stochasticity at all.
         ess_threshold: Resampling strategy, identical to `steered_reverse_sampling`:
                        adaptive when 0 < ess_threshold < 1 (resample once ESS/N drops
                        below it), fixed-interval when ess_threshold >= 1 (a whole number
                        of steps). A final resample always fires after the last step.
-        guidance:      (x, t) -> (u, corr), or None for an unguided flow. `u` is the field
-                       added to the probability-flow velocity, shaped [N, *rest, D]; `corr`
-                       is ∇·u + ⟨s_t, u⟩ per particle, shaped [N]. Both are the caller's to
-                       supply because ∇·u is analytic for the usual guidance fields (for
-                       u = c∇ρ with a Gaussian reward it is a constant) and estimating it
-                       numerically would defeat the purpose.
-        resample_at_churn: also weight and test ESS after the churn half, at the reheated
-                       state. Costs one extra `potential` call per step. Two caveats: in
-                       fixed-interval mode both tests share the same step index, so on an
-                       interval boundary the resample fires twice in one iteration — valid,
-                       but it spends two rounds of resampling variance on one round of
-                       weight information; and `ess_history` records only the
-                       post-transport value, so the churn-half ESS is not returned.
+        potential:     (x, t) -> [N]; the log tilt ρ_t(x) = β(t)·r(x, t), reduced over
+                       `*rest` and `D`. Alternative to `weight_update`, see above.
 
     Returns:
         trajectory:     [T, N, *rest, D]
@@ -354,6 +350,8 @@ def steered_reverse_churn_sampling(
     _validate_time_grid(t)
     if not torch.all(t[1:] < t[:-1]):
         raise ValueError("t must be strictly decreasing for steered_reverse_churn_sampling")
+    if weight_update is None and potential is None:
+        raise ValueError("pass weight_update, potential, or both — otherwise nothing steers")
     if churn < 0:
         raise ValueError(f"churn must be non-negative, got {churn}")
     if ess_threshold <= 0:
@@ -370,7 +368,7 @@ def steered_reverse_churn_sampling(
     # ρ at the current state, carried across steps: the endpoint difference needs the
     # ancestor's tilt, and recomputing it would double the cost of a `potential` that
     # backprops through an unrolled denoiser. On a resample it is gathered, not re-evaluated.
-    rho = potential(x, t[0])
+    rho = None if potential is None else potential(x, t[0])
     trajectory = [x.clone()]
     weight_history = [_normalized_weights(log_w)]
     ess_history: list[float] = []
@@ -383,7 +381,8 @@ def steered_reverse_churn_sampling(
             trigger = ess_ < ess_threshold
         if trigger:
             idx_ = _systematic_resample(log_w_)
-            x_, rho_ = x_[idx_], rho_[idx_]
+            x_ = x_[idx_]
+            rho_ = None if rho_ is None else rho_[idx_]
             log_w_ = torch.zeros(x_.shape[0], dtype=x_.dtype, device=x_.device)
         return x_, rho_, log_w_, ess_
 
@@ -393,24 +392,19 @@ def steered_reverse_churn_sampling(
         # ---- churn half: exact forward kernel t -> t̂ ----
         if t_hat > t_curr:
             x = transition(x, t_curr, t_hat)
-        if resample_at_churn:
-            rho_hat = potential(x, t_hat)
-            log_w = log_w + rho_hat - rho  # exact: q_t·K = q_t̂
-            rho = rho_hat
-            x, rho, log_w, _ = _maybe_resample(step, x, rho, log_w)
 
         # ---- deterministic half: probability-flow transport t̂ -> t+dt ----
-        span = t_next - t_hat
-        if guidance is None:
-            x = x + velocity(x, t_hat) * span
-        else:
-            u, corr = guidance(x, t_hat)
-            x = x + (velocity(x, t_hat) + u) * span
-            log_w = log_w + corr * span  # ∇·u + ⟨s,u⟩ integrated over the span
+        # The weight is taken at the reheated pair (x̂, t̂) — where the transport starts
+        # and where the score is evaluated — mirroring the pre-step (x, t) of the
+        # Euler-Maruyama sampler.
+        if weight_update is not None:
+            log_w = log_w + weight_update(x, t_hat, t_next - t_curr)
+        x = x + drift(x, t_hat) * (t_next - t_hat)
 
-        rho_next = potential(x, t_next)
-        log_w = log_w + rho_next - rho  # retarget q_t·e^{ρ_t} onto q_{t+dt}·e^{ρ_{t+dt}}
-        rho = rho_next
+        if potential is not None:
+            rho_next = potential(x, t_next)
+            log_w = log_w + rho_next - rho  # retarget q_t·e^{ρ_t} onto q_{t+dt}·e^{ρ_{t+dt}}
+            rho = rho_next
 
         x, rho, log_w, ess = _maybe_resample(step, x, rho, log_w)
         ess_history.append(ess)
