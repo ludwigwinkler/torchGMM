@@ -177,6 +177,121 @@ class TestChurnSteeringReducesToUnsteered:
 
 
 @pytest.mark.slow
+class TestSteeredChurnGuidedFlow:
+    """Guiding the deterministic half, and weighting the churn half explicitly.
+
+    With `guidance` the probability flow integrates `velocity + u`, moving part of the tilt
+    out of the weights and into the dynamics. A deterministic half carries no diffusion, so
+    unlike Prop. D.6 the reward Laplacian does not cancel and the compensation
+
+        ∇·u + ⟨s_t, u⟩   (integrated over the transport span)
+
+    must be applied explicitly. Here u = c·(g²/2)·∇ρ, for which ∇·u = c·(g²/2)·Δρ is
+    analytic (Δρ = −β(t)·D/ς² for a Gaussian reward). c is a free knob: the construction is
+    exact for any field, so these must all land on the same tilted marginals.
+    """
+
+    EPS = 0.001
+    N_PARTICLES = 10_000
+    N_STEPS = 500
+    REWARD_SIGMA = 1.0
+
+    @pytest.fixture
+    def setup(self):
+        sched = BetaSchedule(beta_min=0.1, beta_max=20.0)
+        gmm = GMM(
+            mu=torch.tensor([[[-2.5], [2.5]]]),
+            sigma=torch.tensor([[[0.8], [0.8]]]),
+            weight=torch.tensor([[0.2, 0.8]]),
+            schedule=sched,
+        )
+        return gmm, sched
+
+    def _pieces(self, gmm, sched, reward_center, c, drop_correction=False):
+        def r(x):
+            return -0.5 * (x - reward_center) ** 2 / self.REWARD_SIGMA**2
+
+        def beta_fn(t):
+            return 1.0 - t
+
+        def potential(x, t):
+            return (beta_fn(t) * r(x)).squeeze(-1).squeeze(-1)
+
+        def guidance(x, t):
+            g2 = sched.diffusion_coeff(t) ** 2
+            grad_rho = -beta_fn(t) * (x - reward_center) / self.REWARD_SIGMA**2
+            u = c * (g2 / 2) * grad_rho
+            if drop_correction:
+                return u, torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+            lap_rho = -beta_fn(t) / self.REWARD_SIGMA**2  # D = 1
+            corr = c * (g2 / 2) * (lap_rho + (gmm.score(x, t) * grad_rho).sum(-1).squeeze(-1))
+            return u, corr
+
+        return r, beta_fn, potential, guidance
+
+    def _run(self, gmm, sched, reward_center, c, resample_at_churn=False, drop_correction=False):
+        _, _, potential, guidance = self._pieces(gmm, sched, reward_center, c, drop_correction)
+        torch.manual_seed(0)
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
+        x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
+        traj, ess, weight_hist = steered_reverse_churn_sampling(
+            gmm.velocity,
+            sched.transition,
+            potential,
+            x0,
+            t,
+            churn=1.0,
+            ess_threshold=25,
+            guidance=guidance,
+            resample_at_churn=resample_at_churn,
+        )
+        return t, traj, weight_hist
+
+    def _w1_profile(self, gmm, sched, reward_center, t, traj, weight_hist):
+        r, beta_fn, _, _ = self._pieces(gmm, sched, reward_center, 0.0)
+        xs = torch.linspace(-8, 8, 400).reshape(-1, 1, 1)
+        out = []
+        for t_idx in range(10, self.N_STEPS, 10):  # 49 slots
+            p_tilt = _tilted_density(gmm, xs, t[t_idx], beta_fn, lambda x, t__: r(x))
+            w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
+            out.append((t[t_idx], sched.get_sigma_t(t[t_idx]).item(), w1))
+        return out
+
+    @pytest.mark.parametrize("resample_at_churn", [False, True], ids=lambda v: f"churn_resample={v}")
+    @pytest.mark.parametrize("c", [0.25, 0.5, 1.0], ids=lambda v: f"c={v}")
+    @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
+    def test_guided_flow_matches_tilted_intermediate_marginals(self, setup, reward_center, c, resample_at_churn):
+        gmm, sched = setup
+        t, traj, weight_hist = self._run(gmm, sched, reward_center, c, resample_at_churn)
+        for t_, sigma_t, w1 in self._w1_profile(gmm, sched, reward_center, t, traj, weight_hist):
+            tol = 0.05 * (1.0 + sigma_t)
+            assert w1 < tol, (
+                f"guided c={c} center={reward_center} churn_resample={resample_at_churn} "
+                f"t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
+            )
+
+    @pytest.mark.parametrize("c", [0.5, 1.0], ids=lambda v: f"c={v}")
+    def test_dropping_the_compensation_breaks_the_marginals(self, setup, c):
+        """Guard: the ∇·u + ⟨s,u⟩ term must be load-bearing, not decorative.
+
+        Without it the sampler still produces high-reward samples — it just targets the
+        wrong distribution, which is exactly the failure mode a reward-only check misses.
+        Deleting the term must therefore make W1 much worse, not marginally worse.
+        """
+        gmm, sched = setup
+        t_ok, traj_ok, w_ok = self._run(gmm, sched, -2.0, c)
+        t_bad, traj_bad, w_bad = self._run(gmm, sched, -2.0, c, drop_correction=True)
+        prof_ok = self._w1_profile(gmm, sched, -2.0, t_ok, traj_ok, w_ok)
+        prof_bad = self._w1_profile(gmm, sched, -2.0, t_bad, traj_bad, w_bad)
+        mean_ok = sum(w for _, _, w in prof_ok) / len(prof_ok)
+        mean_bad = sum(w for _, _, w in prof_bad) / len(prof_bad)
+        assert mean_bad > 4 * mean_ok, (
+            f"c={c}: dropping the compensation changed mean W1 only {mean_ok:.4f} -> "
+            f"{mean_bad:.4f}; the term is not being exercised by this configuration"
+        )
+
+
+@pytest.mark.slow
 class TestSteeredChurnBetaIntermediateMarginals:
     """Weighted intermediate-time checks under BetaSchedule, direct reward r(x_t).
 

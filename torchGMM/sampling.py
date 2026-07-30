@@ -268,6 +268,8 @@ def steered_reverse_churn_sampling(
     t: Float[Tensor, " T"],
     churn: float = 1.0,
     ess_threshold: float | int = 0.5,
+    guidance: Callable | None = None,
+    resample_at_churn: bool = False,
 ) -> tuple[Float[Tensor, "T N *rest D"], list[float], Float[Tensor, "T N"]]:
     """FKC-steered churn sampling: `reverse_churn_sampling` run as an SMC particle filter.
 
@@ -286,12 +288,33 @@ def steered_reverse_churn_sampling(
 
     which retargets the pushforward of the old tilted cloud onto the new one. Nothing
     else is needed: no β̇_t, no ∂_t r, no reward Laplacian, no score-alignment inner
-    product — all of which the continuous-time weight of Proposition D.6 requires. The
-    drift is *not* guided either; the base probability flow is left untouched, which is
-    what keeps the correction a plain endpoint difference (§6).
+    product — all of which the continuous-time weight of Proposition D.6 requires.
 
     The increments telescope, so between resamples log w is bounded by the range of ρ
     rather than accumulating like a stochastic integral.
+
+    **Split weighting.** The step is two operators, so the increment splits at the
+    reheated state and the halves telescope back to the whole:
+
+        Δlog w_churn = ρ_t̂(x̂) − ρ_t(x)          (exact: the kernel maps q_t onto q_t̂)
+        Δlog w_ODE   = ρ_{t+dt}(x_{t+dt}) − ρ_t̂(x̂)
+
+    `resample_at_churn` makes that split explicit and tests ESS after the churn half too,
+    so particles can be selected at the reheated noise level where diversity is highest.
+    It costs one extra `potential` evaluation per step; with it False the two halves are
+    accumulated as the single telescoped difference above and ρ_t̂(x̂) is never evaluated.
+
+    **Guided flow.** With `guidance` supplied the deterministic half integrates
+    `velocity + u` instead of `velocity`, moving part of the tilt out of the weights and
+    into the dynamics. A deterministic half has no diffusion term, so unlike Prop. D.6
+    the reward Laplacian does *not* cancel; the exact compensation is
+
+        Δlog w_ODE = ρ_{t+dt}(x_{t+dt}) − ρ_t̂(x̂) + [∇·u + ⟨s_t, u⟩]·(t+dt − t̂)
+
+    where ∇·u + ⟨s_t,u⟩ = (1/q)∇·(q u) is the compressibility of the guidance field
+    against the base marginal. This is exact for *any* field u and any span — u is a free
+    knob trading weight variance for drift, exactly as `a` is in Prop. D.6 — so it does
+    not have to match the D.6 magic constant. u = 0 recovers the plain endpoint form.
 
     Args:
         velocity:      (x, t) -> [N, *rest, D]; probability-flow velocity, e.g. `gmm.velocity`.
@@ -308,6 +331,14 @@ def steered_reverse_churn_sampling(
                        adaptive when 0 < ess_threshold < 1 (resample once ESS/N drops
                        below it), fixed-interval when ess_threshold >= 1 (a whole number
                        of steps). A final resample always fires after the last step.
+        guidance:      (x, t) -> (u, corr), or None for an unguided flow. `u` is the field
+                       added to the probability-flow velocity, shaped [N, *rest, D]; `corr`
+                       is ∇·u + ⟨s_t, u⟩ per particle, shaped [N]. Both are the caller's to
+                       supply because ∇·u is analytic for the usual guidance fields (for
+                       u = c∇ρ with a Gaussian reward it is a constant) and estimating it
+                       numerically would defeat the purpose.
+        resample_at_churn: also weight and test ESS after the churn half, at the reheated
+                       state. Costs one extra `potential` call per step.
 
     Returns:
         trajectory:     [T, N, *rest, D]
@@ -338,28 +369,46 @@ def steered_reverse_churn_sampling(
     trajectory = [x.clone()]
     weight_history = [_normalized_weights(log_w)]
     ess_history: list[float] = []
+
+    def _maybe_resample(step_idx, x_, rho_, log_w_):
+        ess_ = _ess_ratio(log_w_)
+        if interval_mode:
+            trigger = (step_idx + 1) % resample_every == 0
+        else:
+            trigger = ess_ < ess_threshold
+        if trigger:
+            idx_ = _systematic_resample(log_w_)
+            x_, rho_ = x_[idx_], rho_[idx_]
+            log_w_ = torch.zeros(x_.shape[0], dtype=x_.dtype, device=x_.device)
+        return x_, rho_, log_w_, ess_
+
     for step, (t_curr, t_next) in enumerate(zip(t[:-1], t[1:])):
         t_hat = (t_curr + churn * (t_next - t_curr).abs()).clamp(max=1.0)
+
+        # ---- churn half: exact forward kernel t -> t̂ ----
         if t_hat > t_curr:
-            x = transition(x, t_curr, t_hat)  # exact forward kernel, t -> t̂
-        x = x + velocity(x, t_hat) * (t_next - t_hat)  # PF-ODE transport t̂ -> t+dt
+            x = transition(x, t_curr, t_hat)
+        if resample_at_churn:
+            rho_hat = potential(x, t_hat)
+            log_w = log_w + rho_hat - rho  # exact: q_t·K = q_t̂
+            rho = rho_hat
+            x, rho, log_w, _ = _maybe_resample(step, x, rho, log_w)
+
+        # ---- deterministic half: probability-flow transport t̂ -> t+dt ----
+        span = t_next - t_hat
+        if guidance is None:
+            x = x + velocity(x, t_hat) * span
+        else:
+            u, corr = guidance(x, t_hat)
+            x = x + (velocity(x, t_hat) + u) * span
+            log_w = log_w + corr * span  # ∇·u + ⟨s,u⟩ integrated over the span
 
         rho_next = potential(x, t_next)
         log_w = log_w + rho_next - rho  # retarget q_t·e^{ρ_t} onto q_{t+dt}·e^{ρ_{t+dt}}
         rho = rho_next
 
-        ess = _ess_ratio(log_w)
+        x, rho, log_w, ess = _maybe_resample(step, x, rho, log_w)
         ess_history.append(ess)
-
-        if interval_mode:
-            should_resample = (step + 1) % resample_every == 0
-        else:
-            should_resample = ess < ess_threshold
-
-        if should_resample:
-            idx = _systematic_resample(log_w)
-            x, rho = x[idx], rho[idx]
-            log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
 
         trajectory.append(x.clone())
         weight_history.append(_normalized_weights(log_w))
