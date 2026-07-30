@@ -10,6 +10,8 @@ plumbing here is deliberately much smaller — no gradients, no β̇ — and the
 assertions are deliberately identical.
 """
 
+from pathlib import Path
+
 import pytest
 import torch
 from test_steering import (
@@ -263,6 +265,26 @@ class TestSteeredChurnGuidedFlow:
     def test_guided_flow_matches_tilted_intermediate_marginals(self, setup, reward_center, c, resample_at_churn):
         gmm, sched = setup
         t, traj, weight_hist = self._run(gmm, sched, reward_center, c, resample_at_churn)
+
+        if PLOT:
+            r, beta_fn, _, _ = self._pieces(gmm, sched, reward_center, c)
+            plot_churn_marginal_comparison(
+                runs=[(f"guided c={c}", t, traj, weight_hist)],
+                gmm=gmm,
+                beta_fn=beta_fn,
+                reward_fn=lambda x, t__: r(x),
+                time_indices=[100, 250, 400, self.N_STEPS - 1],
+                reward_center=reward_center,
+                out_path=(
+                    _plot_dir("test_guided_flow_matches_tilted_intermediate_marginals")
+                    / f"guided_c{c}_center{reward_center}_churnresample{resample_at_churn}.png"
+                ),
+                suptitle=(
+                    f"Guided churn-FKC — BetaSchedule, churn=1.0, c={c}, "
+                    f"reward center={reward_center}, churn-half resample={resample_at_churn}"
+                ),
+            )
+
         for t_, sigma_t, w1 in self._w1_profile(gmm, sched, reward_center, t, traj, weight_hist):
             tol = 0.05 * (1.0 + sigma_t)
             assert w1 < tol, (
@@ -285,6 +307,28 @@ class TestSteeredChurnGuidedFlow:
         prof_bad = self._w1_profile(gmm, sched, -2.0, t_bad, traj_bad, w_bad)
         mean_ok = sum(w for _, _, w in prof_ok) / len(prof_ok)
         mean_bad = sum(w for _, _, w in prof_bad) / len(prof_bad)
+
+        if PLOT:
+            r, beta_fn, _, _ = self._pieces(gmm, sched, -2.0, c)
+            plot_churn_marginal_comparison(
+                runs=[
+                    (f"guided c={c}, compensation ON", t_ok, traj_ok, w_ok),
+                    (f"guided c={c}, compensation OFF", t_bad, traj_bad, w_bad),
+                ],
+                gmm=gmm,
+                beta_fn=beta_fn,
+                reward_fn=lambda x, t__: r(x),
+                time_indices=[100, 250, 400, self.N_STEPS - 1],
+                reward_center=-2.0,
+                out_path=(
+                    _plot_dir("test_dropping_the_compensation_breaks_the_marginals") / f"compensation_ablation_c{c}.png"
+                ),
+                suptitle=(
+                    f"Guidance compensation ∇·u + ⟨s,u⟩ ablation — u = {c}·(g²/2)·∇ρ\n"
+                    f"mean W1 over {len(prof_ok)} slots: {mean_ok:.4f} with it, {mean_bad:.4f} without"
+                ),
+            )
+
         assert mean_bad > 4 * mean_ok, (
             f"c={c}: dropping the compensation changed mean W1 only {mean_ok:.4f} -> "
             f"{mean_bad:.4f}; the term is not being exercised by this configuration"
@@ -526,3 +570,79 @@ class TestSteeredChurnDenoisingKarras(KarrasDenoiseMixin):
         assert w1_terminal < 0.075, (
             f"Karras denoising terminal churn={churn} center={reward_center} ess={ess_threshold}: W1={w1_terminal:.4f}"
         )
+
+
+def plot_churn_marginal_comparison(
+    runs,
+    gmm,
+    beta_fn,
+    reward_fn,
+    time_indices,
+    reward_center,
+    out_path,
+    suptitle,
+    grid_radius=8.0,
+    n_grid=400,
+    n_hist_bins=80,
+):
+    """Grid of density comparisons for one or more churn-steered runs.
+
+    One row per run, one column per time index. Each panel overlays the base marginal
+    q_t, the analytic tilted target pi_t ∝ q_t·exp(rho_t), and the *weighted* empirical
+    density of the particles — weighted because SMC particles are only correct as a
+    weighted cloud, so an unweighted histogram is expected to be wrong between resamples
+    (see tests/CLAUDE.md). Each panel is titled with its weighted W1, so a row that drifts
+    off the red curve is visible both by eye and by number.
+
+    Pass several runs to compare steering variants against a shared target — guided vs
+    unguided, or with vs without the guidance compensation.
+
+    Args:
+        runs:          [(label, t, trajectory, weight_history)], one entry per row.
+        gmm, beta_fn:  used to build the analytic curves; reward_fn is (x, t) -> reward.
+        reward_fn:     (x, t) -> [*, 1, 1] reward on the grid, matching `_tilted_density`.
+        time_indices:  trajectory indices to show, one per column.
+        reward_center: drawn as a vertical marker.
+        out_path:      PNG destination; parent directories are created.
+        suptitle:      figure-level title.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    xs = torch.linspace(-grid_radius, grid_radius, n_grid).reshape(-1, 1, 1)
+    xs_flat = xs.squeeze()
+    edges = torch.linspace(-grid_radius, grid_radius, n_hist_bins + 1)
+
+    fig, axes = plt.subplots(
+        len(runs), len(time_indices), figsize=(4.6 * len(time_indices), 3.1 * len(runs)), squeeze=False, sharex=True
+    )
+    for row, (label, t, traj, weight_hist) in enumerate(runs):
+        for col, t_idx in enumerate(time_indices):
+            ax = axes[row][col]
+            t_ = t[t_idx]
+
+            p_base = gmm.log_prob(xs, t=t_).squeeze().exp()
+            p_base = p_base / torch.trapezoid(p_base, xs_flat)
+            p_tilt = _tilted_density(gmm, xs, t_, beta_fn, reward_fn)
+            w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs_flat, p_tilt)
+            hist, _ = torch.histogram(traj[t_idx, :, 0, 0], bins=edges, weight=weight_hist[t_idx], density=True)
+
+            ax.plot(xs_flat, p_base, color="steelblue", ls=":", lw=2, label="base $q_t$")
+            ax.plot(xs_flat, p_tilt, color="firebrick", lw=2.4, label=r"analytic tilted $\pi_t$")
+            ax.stairs(hist, edges, color="seagreen", fill=True, alpha=0.4, label="steered (weighted)")
+            ax.axvline(reward_center, color="firebrick", ls="--", lw=0.9)
+            ax.set_title(f"t={t_:.3f}   W1={w1:.4f}", fontsize=10)
+            ax.grid(alpha=0.2)
+            if col == 0:
+                ax.set_ylabel(label.replace(", ", "\n"), fontsize=9)
+            if row == 0 and col == 0:
+                ax.legend(fontsize=8)
+
+    fig.suptitle(suptitle, fontsize=12)
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=125, bbox_inches="tight")
+    plt.close(fig)
