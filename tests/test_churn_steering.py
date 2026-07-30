@@ -178,6 +178,145 @@ class TestChurnSteeringReducesToUnsteered:
         assert torch.allclose(weight_hist, torch.full_like(weight_hist, 1 / 256), atol=1e-6)
 
 
+class TestChurnSteeringFinalResampleOnly:
+    """Accumulate log weights over the whole trajectory; resample once, at the very end.
+
+    This mirrors the `ess_threshold=1_000` arm that test_steering.py sweeps for the
+    Euler-Maruyama sampler (and that the three marginal classes below also sweep), but
+    makes a much stronger assertion than those can. With no intermediate resample there is
+    no reset and no gather, so the increments telescope across the *entire* trajectory and
+    the accumulated weight collapses to a closed form:
+
+        log w(t_i) = ρ_{t_i}(x_i) − ρ_{t_0}(x_0)                        (unguided)
+        log w(t_i) = ρ_{t_i}(x_i) − ρ_{t_0}(x_0) + Σ_{j<i} corr_j·span_j  (guided)
+
+    Checking that identity is exact arithmetic rather than a Monte-Carlo statistic, so it
+    pins down the weight bookkeeping — the telescoping, the carried ρ, and the
+    accumulation of the guidance compensation — to floating-point precision. A W1 check
+    cannot do that: it only sees the weights through a resampled cloud, and intermediate
+    resampling repeatedly resets log w and hides any drift in the accumulation.
+
+    Run in float64 so "exact" means ~1e-12 rather than "within the float32 noise".
+    """
+
+    N_PARTICLES = 512
+    N_STEPS = 60
+    EPS = 1e-2
+    CHURN = 1.0
+    REWARD_CENTER = -2.0
+    REWARD_SIGMA = 1.0
+    # Interval far exceeding the step count: no intermittent resample can ever fire, so
+    # only the mandatory final one does.
+    FINAL_ONLY = 10_000
+
+    @pytest.fixture
+    def setup(self):
+        sched = BetaSchedule(beta_min=0.1, beta_max=20.0)
+        gmm = GMM(
+            mu=torch.tensor([[[-2.5], [2.5]]], dtype=torch.float64),
+            sigma=torch.tensor([[[0.8], [0.8]]], dtype=torch.float64),
+            weight=torch.tensor([[0.2, 0.8]], dtype=torch.float64),
+            schedule=sched,
+        )
+        return gmm, sched
+
+    def _rho(self, x, t):
+        beta = 1.0 - t
+        r = -0.5 * (x - self.REWARD_CENTER) ** 2 / self.REWARD_SIGMA**2
+        return (beta * r).squeeze(-1).squeeze(-1)
+
+    def _grid(self):
+        return torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS, dtype=torch.float64)
+
+    def _x0(self, gmm):
+        torch.manual_seed(0)
+        return gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
+
+    def test_unguided_log_weights_telescope_to_the_endpoint_difference(self, setup):
+        gmm, sched = setup
+        t, x0 = self._grid(), self._x0(gmm)
+        traj, _, weight_hist = steered_reverse_churn_sampling(
+            gmm.velocity,
+            sched.transition,
+            self._rho,
+            x0,
+            t,
+            churn=self.CHURN,
+            ess_threshold=self.FINAL_ONLY,
+        )
+        rho_0 = self._rho(traj[0], t[0])
+        # Index -1 is overwritten by the mandatory final resample, so check up to -2.
+        for i in range(1, self.N_STEPS - 1):
+            expected = torch.softmax(self._rho(traj[i], t[i]) - rho_0, dim=0)
+            assert torch.allclose(weight_hist[i], expected, atol=1e-12), (
+                f"step {i}: accumulated weights do not equal softmax(ρ_i − ρ_0); "
+                f"max deviation {(weight_hist[i] - expected).abs().max():.3e}"
+            )
+
+    def test_guided_log_weights_add_the_accumulated_compensation(self, setup):
+        """Same identity with a guidance field, which adds Σ corr·span on top.
+
+        Recording `corr` from inside the callable is what makes this checkable: the
+        compensation is evaluated at the reheated state x̂, which never appears in the
+        returned trajectory, so it cannot be reconstructed after the fact.
+        """
+        gmm, sched = setup
+        t, x0 = self._grid(), self._x0(gmm)
+        c = 0.5
+        recorded = []
+
+        def guidance(x, t_hat):
+            g2 = sched.diffusion_coeff(t_hat) ** 2
+            grad_rho = -(1.0 - t_hat) * (x - self.REWARD_CENTER) / self.REWARD_SIGMA**2
+            u = c * (g2 / 2) * grad_rho
+            lap_rho = -(1.0 - t_hat) / self.REWARD_SIGMA**2  # D = 1
+            corr = c * (g2 / 2) * (lap_rho + (gmm.score(x, t_hat) * grad_rho).sum(-1).squeeze(-1))
+            recorded.append((t_hat.clone(), corr.clone()))
+            return u, corr
+
+        traj, _, weight_hist = steered_reverse_churn_sampling(
+            gmm.velocity,
+            sched.transition,
+            self._rho,
+            x0,
+            t,
+            churn=self.CHURN,
+            ess_threshold=self.FINAL_ONLY,
+            guidance=guidance,
+        )
+        assert len(recorded) == self.N_STEPS - 1, "guidance must be called once per step"
+
+        rho_0 = self._rho(traj[0], t[0])
+        accumulated = torch.zeros(self.N_PARTICLES, dtype=torch.float64)
+        for i in range(1, self.N_STEPS - 1):
+            t_hat, corr = recorded[i - 1]
+            accumulated = accumulated + corr * (t[i] - t_hat)  # span of the transport half
+            expected = torch.softmax(self._rho(traj[i], t[i]) - rho_0 + accumulated, dim=0)
+            assert torch.allclose(weight_hist[i], expected, atol=1e-12), (
+                f"step {i}: guided weights do not equal softmax(ρ_i − ρ_0 + Σ corr·span); "
+                f"max deviation {(weight_hist[i] - expected).abs().max():.3e}"
+            )
+
+    def test_weights_are_never_reset_before_the_end(self, setup):
+        """Guard on the premise: if an intermittent resample fired, the identities above
+        would hold vacuously on a uniform row."""
+        gmm, sched = setup
+        t, x0 = self._grid(), self._x0(gmm)
+        _, _, weight_hist = steered_reverse_churn_sampling(
+            gmm.velocity,
+            sched.transition,
+            self._rho,
+            x0,
+            t,
+            churn=self.CHURN,
+            ess_threshold=self.FINAL_ONLY,
+        )
+        uniform = torch.full((self.N_PARTICLES,), 1 / self.N_PARTICLES, dtype=torch.float64)
+        for i in range(1, self.N_STEPS - 1):
+            assert not torch.allclose(weight_hist[i], uniform, atol=1e-9), f"weights reset at step {i}"
+        assert torch.allclose(weight_hist[-1], uniform, atol=1e-12), "final resample must restore uniform weights"
+
+
 @pytest.mark.slow
 class TestSteeredChurnGuidedFlow:
     """Guiding the deterministic half, and weighting the churn half explicitly.

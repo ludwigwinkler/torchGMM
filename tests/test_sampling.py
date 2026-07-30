@@ -41,9 +41,6 @@ def _histogram_setup(radius: float = 5.0):
     bin_edges = torch.cat([(x_flat[0] - dx / 2).unsqueeze(0), x_flat + dx / 2])
     return x_grid, bin_edges
 
-
-
-
 def _wasserstein1(samples, ground_truth_gmm, t, x_grid, bin_edges, batch_index=0):
     """Grid-based 1D W1 between empirical samples and `ground_truth_gmm.log_prob(x_grid, t)`."""
     target = ground_truth_gmm.log_prob(x_grid, t=t).exp()
