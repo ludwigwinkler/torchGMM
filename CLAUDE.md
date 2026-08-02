@@ -19,7 +19,7 @@ pytest                                                           # All tests (pa
 pytest tests/test_gmm.py                                        # Single file
 pytest tests/test_gmm.py::TestShapes::test_gmm_initialization   # Single test
 pytest -m "not slow"                                            # Exclude slow tests
-pytest -n 8                                                      # Run all tests with 8 xdist workers
+pytest -n 4                                                      # Run all tests with 4 xdist workers
 ```
 
 **Lint and format:**

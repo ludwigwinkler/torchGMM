@@ -62,10 +62,3 @@
 
 [tool.ty.environment]
     python-version = "3.10"
-
-[tool.pytest.ini_options]
-    testpaths = ["tests"]
-    addopts = ["-n", "4", "--strict-markers", "--strict-config", "--verbose"]
-    markers = [
-        "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    ]

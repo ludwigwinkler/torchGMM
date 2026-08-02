@@ -75,6 +75,7 @@ forward kernel rather than an additive Brownian increment, so that is the slot i
 
 ```python
 steered_reverse_churn_sampling(drift, transition, weight_update, x, t, churn=1.0, ...)
+steered_reverse_churn_sampling(drift, transition, None, x, t, beta=beta, energy=r, ...)
 steered_reverse_sampling(drift, diffusion, weight_update, x, t, ...)
 ```
 
@@ -84,7 +85,7 @@ Euler-Maruyama sampler; whatever compensation that guidance needs goes into `wei
 which you also own. Do not pass the reverse-SDE drift `f − g²s` — the churn already supplies
 the stochasticity and a score-corrected drift double-counts it.
 
-Two weight contracts, and you may pass either or both (they add):
+Two mutually exclusive weight contracts:
 
 - `weight_update(x, t, dt) -> [N]` — the continuous-time Prop. D.6 form, evaluated at the
   *reheated* pair `(x̂, t̂)`. Because the FKC weight is independent of churn strength
@@ -94,19 +95,23 @@ Two weight contracts, and you may pass either or both (they add):
   `−(1+κ)|dt|`. Both collapse to the familiar form at κ=1, so an implementation that drops
   the κ passes at `churn=1` and fails either side of it — `TestChurnSteeringWithEulerMaruyamaWeight`
   sweeps churn precisely to catch that.
-- `potential(x, t) -> [N]` — the discrete route native to the splitting. The churn kernel
-  already maps `q_t` onto `q_{t+dt}` exactly, so the whole correction is the endpoint
+- `beta(t)` plus `energy(x, t) -> [N]` — the discrete route native to the splitting. They
+  define the tilt as `ρ_t(x) = -β_t U_t(x)`. The churn kernel already maps
+  `q_t` onto `q_{t+dt}` exactly, so the whole correction is the endpoint
   difference `ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t)`: no `β̇_t`, no `∂_t r`, no reward Laplacian, no
-  score-alignment term, and no reward gradient at all, so a denoiser inside `potential` is
-  never backpropagated through. Exact at finite step size rather than only in the limit.
+  score-alignment term, and no reward gradient at all, so a denoiser inside `energy` is
+  never backpropagated through. The sampler materializes this as the exact churn update
+  `ρ_{t̂}(x̂) − ρ_t(x)` and, when used alone, the alpha=0 deterministic update
+  `ρ_{t+dt}(x_{t+dt}) − ρ_{t̂}(x̂)`, which telescope to the endpoint difference. Exact at
+  finite step size rather than only in the limit.
 
-`ρ` is carried across steps and *gathered* on a resample rather than re-evaluated — `potential`
-may be expensive, and recomputing the ancestor's tilt would double its cost per step.
+`ρ` is carried across steps and *gathered* on a resample rather than re-evaluated — `energy`
+may be expensive, and recomputing the ancestor's tilt would double its cost per step. A nonzero
+churn half evaluates a fresh reheated energy before the deterministic endpoint energy;
+the zero-churn path skips that redundant midpoint evaluation.
 
-Weighting and resampling happen once per integration step, after *both* halves. The churn kernel
-maps `q_t` onto `q_t̂` exactly, so splitting the endpoint difference at the reheated state and
-resampling there too (`docs/fkc_churn_steering.md` §5) is correct but buys nothing: measured, it
-doubles the `potential` calls and moves mean ESS/N from 0.997 to 0.998. Don't reintroduce it.
+Energy-derived tilt updates happen after their respective operators, but weighting and resampling decisions
+remain once per integration step after *both* halves. Do not resample at the reheated state.
 
 ## What NOT to do
 
