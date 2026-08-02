@@ -6,10 +6,10 @@
 
 This document states the complete algorithm obtained by running Feynman-Kac-Corrector (FKC)
 steering on top of a churn sampler whose step is (a) an *exact* noising transition to a
-higher noise level followed by (b) a reverse probability-flow ODE step. It is written
-entirely in terms of the tilt **potential** $\rho_t(x)$, because that — not the reward, not
-its gradient, not its Laplacian — is the only object the correction needs. The implementation
-of record is `steered_reverse_churn_sampling` in `torchGMM/sampling.py`.
+higher noise level followed by (b) a reverse probability-flow ODE step. The ratio route is
+parameterized by an energy/reward $U(x,t)$ and tilt schedule $\beta(t)$, which define
+$\rho_t(x)=-\beta(t)U(x,t)$ internally. The implementation of record is
+`steered_reverse_churn_sampling` in `torchGMM/sampling.py`.
 
 The headline is that the finite-step churn sampler should be treated as a **discrete proposal
 kernel**, not as an SDE discretisation. Proposition D.6 in
@@ -48,8 +48,8 @@ that sign: $t\to t-dt$ is a step towards data, $t\to t+\gamma\,dt$ is a step tow
 > `t_hat = t_curr + churn * dt.abs()` and `span = t_next - t_hat`. That is the same sampler
 > written with the opposite sign convention; the translation is $dt_{\text{doc}} =
 > |dt_{\text{code}}|$, and every increment quoted below (`span`, the reheat, the transport)
-> is numerically identical in the two. The `dt` that reaches a `weight_update` callable is
-> the code's signed one.
+> is numerically identical in the two. A `weight_update` receives the code's signed grid
+> step, including when using the energy route.
 
 **Schedule.** A schedule supplies the interpolation coefficients of
 $X_t = \alpha_t X_0 + \sigma_t\varepsilon$ and hence the forward SDE
@@ -124,15 +124,14 @@ time inside the schedule near $t=1$; when it bites, the sampler lands below $t_i
 and the span shrinks to match, since $\mathrm{span}_i = t_{i+1} - (\text{reheated time})$ is
 the definition and $-(1+\gamma)\,dt_i$ only its unclamped value.
 
-**Potential.** The tilt exponent is
+**Energy.** The tilt exponent is
 
-$$\boxed{\;\rho_t(x) = \beta(t)\, r(x,t).\;}$$
+$$\boxed{\;\rho_t(x) = -\beta(t)\, U(x,t).\;}$$
 
-$\beta$ is the annealing/temperature schedule and $r$ is the reward, which may be evaluated
-on the noisy state directly, $r(x)$, or on a denoised estimate, $r(D(x,t))$. The algorithm
-below never needs $\rho$ decomposed into $\beta$ and $r$; it consumes $\rho_t(x)$ as a single
-callable returning one scalar per particle. This is the `potential` argument of
-`steered_reverse_churn_sampling`.
+$\beta$ is the annealing/temperature schedule and $U$ is the energy/reward, which may be
+evaluated on the noisy state directly, $U(x)$, or on a denoised estimate, $U(D(x,t))$.
+`steered_reverse_churn_sampling` receives these as separate `beta` and `energy` callables
+and forms $\rho_t(x)$ internally.
 
 ### 1.1 A notation clash to be aware of
 
@@ -227,12 +226,12 @@ before reheating.
 
 ---
 
-## 4. The potential-only weight (unguided)
+## 4. The energy-only weight (unguided)
 
 Because $M_i$ already maps $q_{t_i}$ onto $q_{t_{i+1}}$, the *entire* importance correction is
-the endpoint difference of the potential. Carrying the weights unchanged through $M_i$
+the endpoint difference of the energy-derived tilt. Carrying the weights unchanged through $M_i$
 produces the unnormalised measure $\int q_{t_i}(x)e^{\rho_{t_i}(x)}M_i(x,dy)$; applying the
-edge potential $G_i(x,y)=\exp(\rho_{t_{i+1}}(y)-\rho_{t_i}(x))$ gives
+edge tilt factor $G_i(x,y)=\exp(\rho_{t_{i+1}}(y)-\rho_{t_i}(x))$ gives
 
 $$
 \int q_{t_i}(x)e^{\rho_{t_i}(x)}M_i(x,dy)\,G_i(x,y)
@@ -265,7 +264,8 @@ This is the practical payoff and is worth stating explicitly. The increment abov
 - **no reward gradient $\nabla_x r$ at all.**
 
 Every one of these is required by the continuous-time weight of Proposition D.6, Eq. (276).
-The consequence for a reward defined on a denoised state, $\rho_t(x)=\beta(t)r(D(x,t))$, is
+The consequence for an energy defined on a denoised state,
+$\rho_t(x)=-\beta(t)U(D(x,t))$, is
 structural: $D$ is evaluated but **never backpropagated through**. The steering plumbing
 collapses to a single scalar-valued callable.
 
@@ -278,7 +278,7 @@ $$
 = \rho_{t_k}(x_k) - \rho_{t_j}(x_j).
 $$
 
-The intermediate potentials cancel identically. Therefore
+The intermediate tilt exponents cancel identically. Therefore
 
 $$\bigl|\log w\bigr| \le \operatorname{range}(\rho)$$
 
@@ -320,19 +320,16 @@ which is §4 verbatim: $\rho_{t_i+\gamma dt_i}(\hat x_i)$ cancels. The split is 
 required for correctness — the two halves are the *same* endpoint correction, applied once
 per operator rather than once per step.
 
-**Why it exists.** The split creates an intermediate state at which the ESS can be tested and
-a resample can fire — at the *reheated* noise level, where the freshly injected noise has just
-maximised particle diversity, so a gather there duplicates ancestors with less loss of
-diversity than one at $t_{i+1}$. The implementation does **not** take this path: it weights and
-resamples once per integration step, after both halves.
+**Implementation.** `steered_reverse_churn_sampling` applies the two energy-derived tilt increments at
+their operator boundaries: the exact churn update immediately after $K$, then the alpha=0
+deterministic update immediately after $\Phi$. It still computes ESS and resamples only once
+per integration step, after both halves; no gather occurs at the reheated state.
 
 **What it costs.** $\rho_{t_i+\gamma dt_i}(\hat x_i)$ is a state that is otherwise never scored, so
-the split evaluates the potential exactly twice per step instead of once: measured
-$2.00$ evaluations/step against $1.00$. Measured benefit on the Karras denoised-reward setup:
-mean $\mathrm{ESS}/N$ moved from $0.997$ to $0.998$, and terminal $W_1$ differences were
-inside the seed-to-seed spread. Given §4.2 that is the expected outcome — the telescoping
-already bounds $\log w$, so there is no depletion for the extra selection opportunity to
-repair. The split is worth revisiting only in a regime where ESS genuinely collapses.
+the split evaluates the energy exactly twice per nonzero-churn step. This does not change
+the accumulated or normalized weights because the midpoint cancels algebraically; it makes the
+two operator-local Feynman-Kac updates explicit. At $\gamma=0$, the churn operator is absent
+and the implementation skips the redundant midpoint evaluation.
 
 ---
 
@@ -359,7 +356,9 @@ Apply it to the base marginal with $w = v_t$:
 
 $$\partial_t\log q_t = -\nabla\!\cdot\! v_t - \langle s_t, v_t\rangle . \tag{6.1}$$
 
-The target is $\log\pi_t = \log q_t + \rho_t - \log Z_t$, and we want to write its evolution as
+The target is
+$\log\pi_t = \log q_t - \beta_t U(x,t) - \log Z_t$
+(equivalently, $\rho_t(x)=-\beta_t U(x,t)$). We want to write its evolution as
 *transport under the guided field* $v_t+u$ plus a Feynman-Kac reweighting term
 $g_t - \mathbb E_{\pi_t}[g_t]$:
 
@@ -484,7 +483,7 @@ $$
 \;}
 $$
 
-For a local linearisation of the reheated potential, define
+For a local linearisation of the reheated energy-derived tilt, define
 $a_i=\nabla_{\hat x}\rho_{t_i+\gamma dt_i}(\hat x)\bigl|_{\hat x=m_i(x_i)}$ and use the mean-shifted
 Gaussian $\widetilde K_i = \mathcal N(m_i+V_ia_i,\;V_i)$, whose log-density correction is
 analytic:
@@ -743,7 +742,7 @@ supplies the stochasticity, and a score-corrected drift double-counts it.
 
 ### 7.4 The two routes are not term-by-term equal
 
-The untwisted endpoint potential of §4 is a *different*, discrete FK factorisation. It does
+The untwisted endpoint-energy route of §4 is a *different*, discrete FK factorisation. It does
 not converge term by term to the finite-variation weight of Eq. (276): the endpoint difference
 contains the **stochastic increment** of $\rho_t(X_t)$, which the continuous-time weight has
 already moved into the dynamics via the guided drift. Recovering D.6's guided drift and weight
@@ -755,7 +754,7 @@ $W_1$ over 8 seeds on a Karras setup was $0.0357 \pm 0.0099$ for Euler-Maruyama 
 $0.0346 \pm 0.0080$ for churn FKC at $\gamma=1$, statistically indistinguishable. Choosing
 $\gamma$ is therefore a variance/accuracy decision about the dynamics alone.
 
-For finite churn steps the discrete endpoint-potential construction is simpler and avoids
+For finite churn steps the discrete endpoint-energy construction is simpler and avoids
 approximating the churn split by a continuous SDE — it is exact at finite step size, where the
 continuous-time route is exact only in the fine-grid limit.
 
@@ -794,25 +793,26 @@ regime, so that the returned terminal particle set is an unweighted sample from 
 
 ### 8.1 $\rho$ is carried and gathered, never recomputed
 
-The one implementation detail that keeps the algorithm at a single potential evaluation per
+The carried endpoint value avoids an unnecessary third energy evaluation per nonzero-churn
 step:
 
 - $\rho_{t_i}(x_i)$ is **carried across steps**. The value written by step $i-1$ as
   $\rho_{t_i}(x_i)$ is the ancestor term that step $i$'s endpoint difference needs. Recomputing
-  it would double the cost of a `potential` that unrolls a denoiser.
+  it would double the cost of an `energy` that unrolls a denoiser.
 - On a resample, $\rho$ is **gathered by the ancestor index**, $\varrho \leftarrow
   \varrho[\mathcal A]$, in lockstep with $x \leftarrow x[\mathcal A]$. This is exact, not an
   approximation: a resampled particle *is* its ancestor, at the same state and the same time,
-  so its potential is its ancestor's potential by definition.
+  so its energy-derived tilt is its ancestor's tilt by definition.
 
-Initialisation costs one extra evaluation, $\varrho_0 = \rho_{t_0}(x_0)$, so the unguided
-sampler makes $N+1$ potential evaluations over $N$ steps.
+Initialisation costs one extra evaluation, $\varrho_0 = \rho_{t_0}(x_0)$. The unguided sampler
+therefore makes $2N+1$ energy evaluations over $N$ nonzero-churn steps, or $N+1$ when
+$\gamma=0$.
 
 ---
 
 ## 9. Full algorithm
 
-Cost annotations: **[score]** = one model/score evaluation, **[$\rho$]** = one potential
+Cost annotations: **[score]** = one model/score evaluation, **[$U$]** = one energy
 evaluation, **[bwd]** = one backward pass, **[free]** = closed-form arithmetic.
 
 The `drift` callable is the caller's: it is the PF velocity plus whatever guidance field the
@@ -823,7 +823,8 @@ never learns which part is guidance.
 INPUT
   drift      b(x,t)                 -> PF velocity v, plus guidance u if any   [score(+bwd)]
   transition K(x,t,s)               -> exact forward kernel, s > t             [free]
-  potential  rho(x,t)               -> beta(t) r(x,t), one scalar/particle     [rho]
+  beta       beta(t)                -> scalar tilt strength                     [free]
+  energy     U(x,t)                 -> one scalar/particle                      [U]
   weight_up  W(x,t,dt_signed)       -> optional incremental log weight         [varies]
                                        dt_signed = -dt < 0, the code's sign (Sec. 1)
   x          [N,*rest,D]            -> N particles drawn from q_{t_0}
@@ -833,7 +834,8 @@ INPUT
 
 INIT
   log_w <- 0                        [N]                                        [free]
-  varrho <- rho(x, t_0)                                                        [rho]  <-- the +1
+  if energy is not None:
+      varrho <- -beta(t_0) * U(x, t_0)                                             [U]  <-- the +1
 
 FOR i = 0 .. N-1:
     dt <- t[i] - t[i+1]                       # step size, > 0                 [free]
@@ -841,17 +843,22 @@ FOR i = 0 .. N-1:
     # ---- (a) churn half: EXACT forward transition t[i] -> t[i] + gamma*dt ----
     if gamma > 0 and t[i] + gamma*dt <= 1:    # + : reheat, towards noise      [free]
         x <- K(x, t[i], t[i] + gamma*dt)      # no score, closed-form draw     [free]
+        if energy is not None:
+            varrho_hat <- -beta(t[i] + gamma*dt) * U(x, t[i] + gamma*dt)         [U]
+            log_w       <- log_w + varrho_hat - varrho                            [free]
+    else:
+        varrho_hat <- varrho
 
     # ---- (b) deterministic half: transport t[i] + gamma*dt -> t[i+1] ----
     span <- t[i+1] - (t[i] + gamma*dt)        # = -(1+gamma)*dt, towards data  [free]
-    if W is not None:                         # Sec. 6 compensation, or the
-        log_w <- log_w + W(x, t[i] + gamma*dt, -dt)   # Sec. 7 D.6 weight      [varies]
+    if W is not None:                    # FKC route; energy is absent
+        log_w <- log_w + W(x, t[i] + gamma*dt, -dt)                               [varies]
     x <- x + b(x, t[i] + gamma*dt) * span                                      [score]
 
-    # ---- (c) retarget: the endpoint potential difference (Sec. 4) ----
-    if rho is not None:
-        varrho_next <- rho(x, t[i+1])                                          [rho]
-        log_w       <- log_w + varrho_next - varrho                            [free]
+    # ---- (c) retarget: alpha=0 deterministic update (energy route only) ----
+    if energy is not None:               # ratio route; W is absent
+        varrho_next <- beta(t[i+1]) * U(x, t[i+1)                              [U]
+        log_w       <- log_w + varrho_next - varrho_hat                         [free]
         varrho      <- varrho_next
 
     # ---- (d) selection ----
@@ -874,17 +881,15 @@ PROCEDURE MAYBE_RESAMPLE(i, x, varrho, log_w):                                 [
     return (x, varrho, log_w)
 ```
 
-The three configurations, all supported:
+The two mutually exclusive configurations supported by the sampler are:
 
-- **`potential` only, unguided `drift`** — §4, the reference implementation. Exact at finite
-  step size, no gradients anywhere.
-- **`potential` + guided `drift` + compensation in `weight_update`** — §6. Exact for any $u$,
-  but needs $\Delta\rho$.
+- **`beta` + `energy` only, unguided `drift`** — §4, the reference implementation. Exact at
+  finite step size, no gradients anywhere.
 - **`weight_update` only, carrying the Prop. D.6 weight, with the §7.3 guided drift** — §7.
   Needs $\nabla r$, no Laplacian. The *same closure* steers the Euler-Maruyama sampler.
 
 Setting $\gamma = 0$ (`churn=0` in the code) skips the transition entirely and reduces every step to a deterministic
-PF-ODE step whose weight is a pure change-of-target term; a flat potential $\rho\equiv0$ then
+PF-ODE step whose weight is a pure change-of-target term; a flat energy $U\equiv0$ then
 leaves the base churn sampler bit-for-bit unchanged, which is the invariant the tests assert.
 
 ---
@@ -896,13 +901,13 @@ Per integration step, in the unguided configuration:
 | item | count | note |
 |---|---|---|
 | score evaluations | $1$ | the PF velocity at $(\hat x_i,\,t_i+\gamma dt_i)$; independent of $\gamma$ |
-| potential evaluations | $1$ | at the step endpoint only |
+| energy evaluations | $2$ for nonzero churn, $1$ for zero churn | at the reheated state and step endpoint |
 | backward passes | $0$ | the endpoint difference needs $\rho$ *values* only |
 | forward-kernel draws | $1$ | closed-form Gaussian, no score |
 
 Guided (§6) adds one backward pass per step, because $u = c\tfrac{g^2}{2}\nabla\rho$ needs
 $\nabla_x\rho$; the divergence half of the compensation stays analytic. Totals over $N$ steps:
-$N$ score calls and $N+1$ potential calls unguided.
+$N$ score calls and $2N+1$ energy calls for nonzero churn, or $N+1$ for zero churn.
 
 **Churn is not paid for in evaluations.** It is paid for in transport length: the deterministic
 half covers $|\mathrm{span}_i| = (1+\gamma)\,dt_i$ instead of $dt_i$, so the same score budget
@@ -979,16 +984,16 @@ covers:
 
 - churn strength, including $0$, $1$, and over-churn ($\gamma=2$);
 - all three `ess_threshold` regimes (adaptive, fixed interval, single final resample);
-- unguided endpoint potential, guided deterministic half at several $c$, and the Prop. D.6
+- unguided endpoint-energy route, guided deterministic half at several $c$, and the Prop. D.6
   weight reused verbatim from the Euler-Maruyama sampler;
 - direct rewards $r(x)$ and denoised rewards $r(D(x,t))$;
 - both `BetaSchedule` (VP) and `KarrasSchedule` (VE).
 
-The untwisted endpoint-potential sampler is the reference implementation; every guided variant
+The untwisted endpoint-energy sampler is the reference implementation; every guided variant
 must match its weighted intermediate marginals. Two checks are stronger than a $W_1$ statistic
 and worth keeping:
 
-- **Reduction.** A flat potential $\rho\equiv0$ must reproduce `reverse_churn_sampling`
+- **Reduction.** A flat energy $U\equiv0$ must reproduce `reverse_churn_sampling`
   bit-for-bit at every $\gamma$.
 - **The weight identity.** With resampling only at the very end, the increments telescope
   (§4.2) to a closed form — $\log w_i = \rho_{t_i}(x_i)-\rho_{t_0}(x_0)$ unguided, plus
