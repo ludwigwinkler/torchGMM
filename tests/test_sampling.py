@@ -1,21 +1,26 @@
+from pathlib import Path
+
 import pytest
 import torch
 from conftest import get_local_device
-
+from test_steering import _weighted_wasserstein1, plot_marginal_density_comparison
 from torchGMM.gmm import GMM
 from torchGMM.sampling import forward_sampling, reverse_churn_sampling, reverse_sampling
 from torchGMM.schedule import BetaSchedule, KarrasSchedule, LinearSchedule
+
+PLOT = True
+PLOT_DIR = Path(__file__).parent / "plots"
 
 torch.set_printoptions(sci_mode=False)
 
 
 @pytest.fixture
-def gmm_model():
+def gmm_model(schedule=BetaSchedule()):
     """Fixture for the GMM model used in diffusion tests."""
     mu = torch.tensor([-2, 0, 2]).reshape(1, 3, 1)
     sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
     weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
-    return GMM(mu=mu, sigma=sigma, weight=weight)
+    return GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 
 @pytest.fixture
@@ -57,6 +62,11 @@ def _wasserstein1(samples, ground_truth_gmm, t, x_grid, bin_edges, batch_index=0
     return (hist_cdf - target_cdf).abs().sum() * dx
 
 
+def _plot_dir(*parts):
+    """Return plots/<test_file>/<TestClass>/<test_function>/... output path."""
+    return PLOT_DIR.joinpath(*parts)
+
+
 class TestForwardSampling:
     t_eps = 0.01
 
@@ -87,7 +97,7 @@ class TestForwardSampling:
         for t_idx in range(n_steps)[::10]:
             t_ = t[t_idx]
             target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)  # [nsteps]
-            import matplotlib.pyplot as plt
+            
 
             # plt.plot(x_grid[:, 0, 0], target, label="Target")
             # plt.hist(
@@ -582,7 +592,7 @@ class TestChurnSampling:
         t_start = 1 - self.eps
         # LinearSchedule's marginal std falls under the bin width below 0.1.
         t_end = 0.1 if schedule_cls is LinearSchedule else self.eps
-        n_samples, n_steps = 10_000, 200
+        n_samples, n_steps = 10_000, 300
         x = gmm.sample(shape=n_samples, t=t_start)
         t = torch.linspace(t_start, t_end, n_steps)
         trajectory = reverse_churn_sampling(gmm.velocity, schedule.transition, x, t, churn=churn)

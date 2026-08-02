@@ -222,18 +222,12 @@ class TestSteeredSamplingBetaFinalMarginal:
         )
         return gmm, sched
 
+    @pytest.mark.parametrize("reward_center", [-2.0, 1.5], ids=lambda v: f"center={v}")
+    @pytest.mark.parametrize("reward_sigma", [1.0], ids=lambda v: f"sigma={v}")
     @pytest.mark.parametrize(
-        "reward_center,reward_sigma,ess_threshold",
-        [
-            (-2.0, 1.0, 0.9),
-            (-1.5, 1.0, 0.9),
-            (-1.5, 1.5, 0.9),
-            (-1.0, 1.0, 0.9),
-            (-1.0, 1.5, 0.9),
-            (-1.5, 1.0, 25),  # fixed-interval: resample every 25 of the 499 integration steps
-            (-1.5, 1.0, 1_000),  # final-only: interval far exceeds 499 integration steps
-        ],
-        ids=lambda v: f"{v}",
+        "ess_threshold",
+        [0.9, 25, 1_000],
+        ids=["adaptive", "interval-25", "final-only"],
     )
     def test_steered_sampling(self, setup, reward_center, reward_sigma, ess_threshold):
         gmm, sched = setup
@@ -536,7 +530,7 @@ class TestSteeredSamplingBetaIntermediateMarginals:
     """Weighted intermediate-time checks for BetaSchedule FKC particle marginals."""
 
     EPS = 0.001
-    N_PARTICLES = 5_000
+    N_PARTICLES = 20_000
     N_STEPS = 500
 
     @pytest.fixture
@@ -633,10 +627,109 @@ class TestSteeredSamplingBetaIntermediateMarginals:
                         / f"beta_intermediate_t{t_idx}_center{reward_center}_resample{resample_every}.png"
                     ),
                 )
-            # assert weighted_w1_tilt < 0.05, (
-            #     f"BetaSchedule weighted intermediate center={reward_center} t={t_:.3f}: W1={weighted_w1_tilt:.4f}"
-            # )
+            assert weighted_w1_tilt < 0.05, (
+                f"BetaSchedule weighted intermediate center={reward_center} t={t_:.3f}: W1={weighted_w1_tilt:.4f}"
+            )
 
+    @pytest.mark.parametrize("reward_center", [-2.0, -0.25, 1.0], ids=lambda v: f"center={v}")
+    @pytest.mark.parametrize("alpha", [0.0, 0.1, 0.5, 1.0, 2.0], ids=lambda v: f"alpha={v}")
+    def test_weighted_beta_reverse_alpha_trajectory_matches_tilted_intermediate_marginals(self, setup, reward_center, alpha):
+        """Weighted reverse particles match p_t ∝ q_t exp(beta(t)r(x_t)) at intermediate times."""
+        gmm, sched = setup
+        reward_sigma = 1.0
+
+        def r(x):
+            return -0.5 * (x - reward_center) ** 2 / reward_sigma**2
+
+        def grad_r(x):
+            return -(x - reward_center) / reward_sigma**2
+
+        def beta_fn(t):
+            return 1.0 - t
+
+        def dbeta_dt(t):
+            return _dbeta_dt(beta_fn, t)
+
+        def guided_drift(x, t):
+            f = sched.forward_drift(x, t)
+            sigma = sched.diffusion_coeff(t)
+            score = gmm.score(x, t)
+            beta = beta_fn(t)
+            return (
+                f
+                - 1 / 2 * (1 + alpha**2) * sigma**2 * score
+                - beta * alpha**2 * (sigma**2 / 2) * grad_r(x)
+            )
+
+        def diffusion(t):
+            return alpha * sched.diffusion_coeff(t)
+
+        def fkc_weight_update(x, t, dt):
+            f = sched.forward_drift(x, t)
+            sigma = sched.diffusion_coeff(t)
+            score = gmm.score(x, t)
+            rg, rv = grad_r(x), r(x)
+            beta = beta_fn(t)
+            term1 = -dbeta_dt(t) * rv
+            term2 = -(beta * rg) * f
+            term3 = (beta * rg) * (sigma**2 / 2) * score
+            return (term1 + term2 + term3).squeeze(-1).squeeze(-1) * dt.abs()
+
+        torch.manual_seed(0)
+        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
+        x0 = torch.randn(self.N_PARTICLES, 1, 1)
+        resample_every = self.N_STEPS+5
+        # In interval mode, steered_reverse_sampling resets log_w to zero after
+        # steps 50, 100, ... and stores the post-resample particle cloud at the
+        # matching trajectory index. The final trajectory index is also resampled.
+        traj, _, weight_hist = steered_reverse_sampling(
+            guided_drift, diffusion, fkc_weight_update, x0, t, ess_threshold=resample_every
+        )
+        assert weight_hist.shape == (self.N_STEPS, self.N_PARTICLES)
+
+        xs = torch.linspace(-6, 6, 250).reshape(-1, 1, 1)
+        xs_flat = xs.squeeze()
+        for t_idx in [25, 50, 75, 125, 150, 275, 300, 350, 400, 450, self.N_STEPS - 2, self.N_STEPS - 1]:
+            t_ = t[t_idx]
+            p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: r(x))
+            x_t = traj[t_idx, :, 0, 0]
+            weighted_w1_tilt = _weighted_wasserstein1(x_t, weight_hist[t_idx], xs_flat, p_tilt)
+            if PLOT:
+                log_p_data = gmm.log_prob(xs, t=t_).squeeze()
+                p_data = log_p_data.exp()
+                p_data = p_data / torch.trapezoid(p_data, xs_flat)
+                plot_marginal_density_comparison(
+                    xs_flat=xs_flat,
+                    p_data=p_data,
+                    p_rew=p_tilt,
+                    samples=x_t,
+                    reward_center=reward_center,
+                    weights=weight_hist[t_idx],
+                    title=_intermediate_marginal_title(
+                        schedule_name="BetaSchedule",
+                        reward_name="direct noisy-state reward r(x_t)",
+                        t=t_,
+                        t_idx=t_idx,
+                        resample_every=resample_every,
+                        w1=weighted_w1_tilt,
+                    ),
+                    out_path=(
+                        _plot_dir(
+                            "test_steering",
+                            "TestSteeredSamplingBetaIntermediateMarginals",
+                            "test_weighted_beta_reverse_alpha_trajectory_matches_tilted_intermediate_marginals",
+                            f"alpha{alpha}",
+                            f"center{reward_center}",
+                        )
+                        / (
+                            f"beta_alpha{alpha}_intermediate_t{t_idx}_center{reward_center}_"
+                            f"resample{resample_every}.png"
+                        )
+                    ),
+                )
+            assert weighted_w1_tilt < 0.05, (
+                f"BetaSchedule weighted intermediate center={reward_center} t={t_:.3f}: W1={weighted_w1_tilt:.4f}"
+            )
 
 @pytest.mark.slow
 class TestSteeredSamplingKarrasIntermediateMarginals:
@@ -644,7 +737,7 @@ class TestSteeredSamplingKarrasIntermediateMarginals:
 
     EPS = 0.001
     T_NOISE = 1 - EPS
-    N_PARTICLES = 5_000
+    N_PARTICLES = 10_000
     N_STEPS = 610
 
     @pytest.fixture
@@ -1212,8 +1305,10 @@ def plot_marginal_density_comparison(
     max_x=None,
     weights=None,
     n_hist_bins=80,
+    energy=None,
+    energy_time=None,
 ):
-    """Save a single-time marginal density comparison plot."""
+    """Save a single-time marginal density comparison, optionally showing its energy."""
     import matplotlib.pyplot as plt
 
     if min_x is not None and max_x is not None:
@@ -1240,6 +1335,21 @@ def plot_marginal_density_comparison(
         max_x=max_x,
         weighted_hist=weighted_hist,
     )
+    if energy is not None:
+        energy_x = xs_flat.reshape(-1, 1, 1)
+        energy_values = energy(energy_x, energy_time).squeeze().detach().cpu()
+        energy_ax = ax.twinx()
+        energy_ax.plot(
+            xs_flat.cpu(),
+            energy_values,
+            label="Energy",
+            color="darkviolet",
+            linestyle="--",
+            linewidth=1.5,
+        )
+        energy_ax.set_ylabel("energy", color="darkviolet")
+        energy_ax.tick_params(axis="y", labelcolor="darkviolet")
+        energy_ax.legend(loc="upper left", fontsize=9)
     fig.tight_layout()
 
     out_path = Path(out_path)

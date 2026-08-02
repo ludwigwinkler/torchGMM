@@ -158,7 +158,8 @@ def reverse_churn_sampling(
 
 def _ess_ratio(log_w: torch.Tensor) -> float:
     lw = log_w - torch.logsumexp(log_w, 0)
-    return (torch.exp(-torch.logsumexp(2 * lw, 0)) / log_w.shape[0]).item()
+    ess = torch.exp(-torch.logsumexp(2 * lw, 0)) / log_w.shape[0]
+    return ess.clamp(0.0, 1.0).item()
 
 
 def _systematic_resample(log_w: torch.Tensor) -> torch.Tensor:
@@ -268,7 +269,8 @@ def steered_reverse_churn_sampling(
     t: Float[Tensor, " T"],
     churn: float = 1.0,
     ess_threshold: float | int = 0.5,
-    potential: Callable | None = None,
+    beta: Callable | None = None,
+    energy: Callable | None = None,
 ) -> tuple[Float[Tensor, "T N *rest D"], list[float], Float[Tensor, "T N"]]:
     """FKC-steered churn sampling: `reverse_churn_sampling` run as an SMC particle filter.
 
@@ -288,38 +290,39 @@ def steered_reverse_churn_sampling(
     The sampler never needs to know which part is guidance, because whatever compensation
     the guidance requires belongs in `weight_update`, which the caller also owns.
 
-    **Two ways to weight.** They are different Feynman-Kac factorisations; supply either,
-    or both, in which case their increments simply add. At least one is required.
+    **Two ways to weight.** Exactly one is required. `beta` plus `energy` define the
+    log tilt as ρ_t(x) = -β_t U_t(x), and alone supply both exact operator-local
+    tilt-ratio increments. `weight_update` alone supplies the continuous-time FKC
+    increment over the grid step. They are distinct change-of-measure constructions and
+    must not be combined.
 
-    `weight_update(x, t, dt) -> [N]` is the continuous-time route, identical in form and
-    meaning to `steered_reverse_sampling`'s. It is evaluated at the *reheated* pair (x̂, t̂),
-    since that is where the transport starts and where the score is taken. The churn
-    splitting's continuous limit is the standard λ-family reverse SDE at λ=√churn, and the
-    Prop. D.6 weight for that generator is **independent of churn** (see
+    `weight_update(x, t, dt) -> [N]` is evaluated at the *reheated* pair (x̂, t̂), since
+    that is where the transport starts and where the score is taken. Without an energy tilt,
+    it is the continuous-time route, identical in form and meaning to
+    `steered_reverse_sampling`'s: it receives the grid step `dt = t_next - t_curr`. The
+    churn splitting's continuous limit is the standard λ-family reverse SDE at λ=√churn,
+    and the Prop. D.6 weight for that generator is **independent of churn** (see
     `docs/fkc_churn_steering.md` §7) — so the very same `fkc_weight_update` closure works
-    here and in `steered_reverse_sampling`, at any churn strength. Exact in the limit of a
-    fine grid, like any SDE discretisation.
+    here and in `steered_reverse_sampling`, at any churn strength. It always receives the
+    signed grid step `dt = t_next - t_curr`.
 
-    `potential(x, t) -> [N]` is the discrete route, native to the splitting: because the
-    churn kernel already maps q_t onto q_{t+dt} exactly, the entire correction is the
+    `beta(t)` plus `energy(x, t) -> [N]` is the discrete route, native to the splitting:
+    because the churn kernel already maps q_t onto q_{t+dt} exactly, the entire correction is the
     endpoint difference
 
-        Δlog w = ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t),
+        Δlog w = -β_{t+dt}U_{t+dt}(x_{t+dt}) + β_tU_t(x_t),
 
     with no β̇_t, no ∂_t r, no reward Laplacian, no score-alignment term and no reward
-    gradient at all — so a denoiser inside `potential` is never backpropagated through.
-    This is exact at finite step size rather than only in the limit, and ρ is carried
-    across steps and gathered on a resample, so it costs one evaluation per step. Its
-    increments telescope, so between resamples log w stays bounded by the range of ρ.
-    A guided `drift` still needs its compensation ∇·u + ⟨s_t,u⟩ — the endpoint difference
-    alone is exact only for an unguided flow. Supply it through `weight_update` alongside
-    `potential`; the transport span it multiplies is `dt − churn·|dt|`, recoverable from
-    the `dt` the callable receives. A deterministic half has no diffusion term, so unlike
-    Prop. D.6 the reward Laplacian in ∇·u does *not* cancel and has to be carried.
+    gradient at all — so a denoiser inside `energy` is never backpropagated through. The
+    sampler always applies the exact transition-ratio weight
+    ρ_{t̂}(x̂) − ρ_t(x). With no `weight_update`, it follows with the deterministic-leg
+    tilt ratio ρ_{t+dt}(x_{t+dt}) − ρ_{t̂}(x̂), so the two telescope to the full
+    endpoint difference. With `weight_update`, that second ratio is omitted because the
+    FKC callback owns the deterministic leg. ρ is carried across steps and gathered on a
+    resample.
 
-    Weighting and resampling happen once per integration step, after both halves: the
-    churn kernel maps q_t onto q_t̂ exactly, so the churn half carries no weight of its own
-    beyond what the endpoint difference already accounts for.
+    Energy-derived tilt increments are applied after their respective operators, but
+    resampling happens once per integration step after both halves.
 
     Args:
         drift:         (x, t) -> [N, *rest, D]; the probability-flow velocity, e.g.
@@ -328,7 +331,7 @@ def steered_reverse_churn_sampling(
                        so a score-corrected drift double-counts it.
         transition:    (x, t, s) -> [N, *rest, D]; exact forward kernel, i.e. `schedule.transition`
         weight_update: (x, t, dt) -> [N] incremental log weight, evaluated at the reheated
-                       pair (x̂, t̂). Pass None to weight by `potential` instead.
+                       pair (x̂, t̂), with the signed grid step `dt = t_next - t_curr`.
         x:             [N, *rest, D] initial state; N = number of particles
         t:             1D strictly decreasing time grid in [0, 1], >= 2 points
         churn:         Churn strength as a multiple of the step size, h = churn·|dt|; see
@@ -338,8 +341,11 @@ def steered_reverse_churn_sampling(
                        adaptive when 0 < ess_threshold < 1 (resample once ESS/N drops
                        below it), fixed-interval when ess_threshold >= 1 (a whole number
                        of steps). A final resample always fires after the last step.
-        potential:     (x, t) -> [N]; the log tilt ρ_t(x) = β(t)·r(x, t), reduced over
-                       `*rest` and `D`. Alternative to `weight_update`, see above.
+        beta:          (t) -> scalar tilt strength β_t. Must be passed together with
+                       `energy`; together they define ρ_t(x) = -β_t U_t(x).
+        energy:        (x, t) -> [N] energy U_t(x), reduced over `*rest` and `D`.
+                       Must be passed together with `beta`; alternative to `weight_update`,
+                       see above.
 
     Returns:
         trajectory:     [T, N, *rest, D]
@@ -350,8 +356,12 @@ def steered_reverse_churn_sampling(
     _validate_time_grid(t)
     if not torch.all(t[1:] < t[:-1]):
         raise ValueError("t must be strictly decreasing for steered_reverse_churn_sampling")
-    if weight_update is None and potential is None:
-        raise ValueError("pass weight_update, potential, or both — otherwise nothing steers")
+    if (beta is None) != (energy is None):
+        raise ValueError("beta and energy must be passed together")
+    if weight_update is not None and energy is not None:
+        raise ValueError("weight_update and beta plus energy are mutually exclusive")
+    if weight_update is None and energy is None:
+        raise ValueError("pass weight_update or beta plus energy — otherwise nothing steers")
     if churn < 0:
         raise ValueError(f"churn must be non-negative, got {churn}")
     if ess_threshold <= 0:
@@ -366,25 +376,12 @@ def steered_reverse_churn_sampling(
 
     log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
     # ρ at the current state, carried across steps: the endpoint difference needs the
-    # ancestor's tilt, and recomputing it would double the cost of a `potential` that
+    # ancestor's tilt, and recomputing it would double the cost of an `energy` that
     # backprops through an unrolled denoiser. On a resample it is gathered, not re-evaluated.
-    rho = None if potential is None else potential(x, t[0])
+    rho = None if energy is None else -beta(t[0]) * energy(x, t[0])
     trajectory = [x.clone()]
     weight_history = [_normalized_weights(log_w)]
     ess_history: list[float] = []
-
-    def _maybe_resample(step_idx, x_, rho_, log_w_):
-        ess_ = _ess_ratio(log_w_)
-        if interval_mode:
-            trigger = (step_idx + 1) % resample_every == 0
-        else:
-            trigger = ess_ < ess_threshold
-        if trigger:
-            idx_ = _systematic_resample(log_w_)
-            x_ = x_[idx_]
-            rho_ = None if rho_ is None else rho_[idx_]
-            log_w_ = torch.zeros(x_.shape[0], dtype=x_.dtype, device=x_.device)
-        return x_, rho_, log_w_, ess_
 
     for step, (t_curr, t_next) in enumerate(zip(t[:-1], t[1:])):
         t_hat = (t_curr + churn * (t_next - t_curr).abs()).clamp(max=1.0)
@@ -392,6 +389,11 @@ def steered_reverse_churn_sampling(
         # ---- churn half: exact forward kernel t -> t̂ ----
         if t_hat > t_curr:
             x = transition(x, t_curr, t_hat)
+            if energy is not None:
+                rho_hat = -beta(t_hat) * energy(x, t_hat)
+                log_w = log_w + rho_hat - rho
+        else:
+            rho_hat = rho
 
         # ---- deterministic half: probability-flow transport t̂ -> t+dt ----
         # The weight is taken at the reheated pair (x̂, t̂) — where the transport starts
@@ -401,13 +403,24 @@ def steered_reverse_churn_sampling(
             log_w = log_w + weight_update(x, t_hat, t_next - t_curr)
         x = x + drift(x, t_hat) * (t_next - t_hat)
 
-        if potential is not None:
-            rho_next = potential(x, t_next)
-            log_w = log_w + rho_next - rho  # retarget q_t·e^{ρ_t} onto q_{t+dt}·e^{ρ_{t+dt}}
+        if energy is not None:
+            rho_next = -beta(t_next) * energy(x, t_next)
+            log_w = log_w + rho_next - rho_hat
             rho = rho_next
 
-        x, rho, log_w, ess = _maybe_resample(step, x, rho, log_w)
+        ess = _ess_ratio(log_w)
         ess_history.append(ess)
+
+        if interval_mode:
+            should_resample = (step + 1) % resample_every == 0
+        else:
+            should_resample = ess < ess_threshold
+
+        if should_resample:
+            idx = _systematic_resample(log_w)
+            x = x[idx]
+            rho = None if rho is None else rho[idx]
+            log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
 
         trajectory.append(x.clone())
         weight_history.append(_normalized_weights(log_w))
