@@ -66,11 +66,11 @@ Plain Euler–Maruyama on any $\alpha>0$ member pits noise injection against sco
 step, both frozen at the step's start. Churn samplers (EDM Algorithm 2, AF3 Algorithm 18) split the two
 operations apart and implement each exactly.
 
-## The churn-denoising cycle
+## The two-move cycle
 
 Grid $s_0=T>\dots>s_M=0$, $\sigma_i := \sigma_{s_i}$.
 
-**Churn — forward transition, exact.** Pick churn factor $\gamma_i\ge0$, inflate
+**Move A — forward transition, exact.** Pick churn factor $\gamma_i\ge0$, inflate
 $\hat\sigma_i=(1+\gamma_i)\sigma_i$, sample the forward kernel exactly. For VE this is plain noise addition:
 
 $$\hat x = x + \sqrt{\hat\sigma_i^2-\sigma_i^2}\,\varepsilon =: x+\varsigma_i\varepsilon,\qquad \varsigma_i^2:=\hat\sigma_i^2-\sigma_i^2.$$
@@ -78,7 +78,7 @@ $$\hat x = x + \sqrt{\hat\sigma_i^2-\sigma_i^2}\,\varepsilon =: x+\varsigma_i\va
 $\varsigma_i^2$ is the **injected variance**. This move has zero discretization error at any $\gamma_i$ — it
 *is* the forward process, mapping $p_{s_i}\to p_{\hat s_i}$ exactly.
 
-**Denoising — deterministic reverse step.** Integrate the $\alpha=0$ member (probability-flow ODE) from
+**Move B — deterministic reverse step.** Integrate the $\alpha=0$ member (probability-flow ODE) from
 $\hat s_i$ to $s_{i+1}$. VE, σ-clock:
 
 $$\frac{dx}{d\sigma} = -\sigma\nabla\log p_\sigma(x) = \frac{x-D(x,\sigma)}{\sigma},\qquad D(x,\sigma)=x+\sigma^2\nabla\log p_\sigma(x)\ \text{(Tweedie)}.$$
@@ -89,7 +89,7 @@ the score is evaluated at the noised point $(\hat x,\hat\sigma)$ rather than the
 
 ## Churn is the α-family, operator-split
 
-Matching the churn and denoising steps' injected variance to one α-family Euler–Maruyama step over the same net interval
+Matching Move A+B's injected variance to one α-family Euler–Maruyama step over the same net interval
 gives
 
 $$\boxed{\;\alpha_{\mathrm{eff}}^2
@@ -100,10 +100,10 @@ $$\boxed{\;\alpha_{\mathrm{eff}}^2
 Churn is a first-order-consistent operator splitting of the α-family, with EDM's
 $\gamma_i=\min(S_{\mathrm{churn}}/N,\sqrt2-1)$ giving a roughly time-constant $\alpha_{\mathrm{eff}}$
 on a geometric grid, and AF3's $\gamma_0=0.8$ at a few hundred steps giving an $\alpha_{\mathrm{eff}}$
-far larger than Euler–Maruyama could integrate stably — viable only because churn is exact.
+far larger than Euler–Maruyama could integrate stably — viable only because Move A is exact.
 
 **In this repo:** `notebooks/af3_steering.py:379-413` (`sample_diffusion`) implements AF3's Algorithm 18
-verbatim — churn at `:399-403`, denoising at `:405-411`. `af3_denoiser` (`:360-376`) computes the score at
+verbatim — Move A at `:399-403`, Move B at `:405-411`. `af3_denoiser` (`:360-376`) computes the score at
 an arbitrary inflated $\hat\sigma$ in closed form by re-noising the GMM, which any steered variant can
 reuse. AF3's `noise_scale` ($\lambda=1.003$) and `step_scale` ($\eta=1.5$) both break the exact-transport
 premise the weights below rest on — see "AF3 knobs" below.
@@ -123,14 +123,14 @@ $$w'^n = w^n\cdot\exp\big(\rho(x'^n,b)-\rho(x^n,a)\big)$$
 
 is properly weighted for $\tilde p_b$. Both churn moves qualify, since both transport $q$ exactly.
 
-**Churn.** The forward kernel gives $q_{s_i}K=q_{\hat s_i}$ at *any* $\gamma_i$:
+**Move A.** The forward kernel gives $q_{s_i}K=q_{\hat s_i}$ at *any* $\gamma_i$:
 
 $$\boxed{\;\Delta\log w_{\mathrm{up}} = \rho(\hat x,\hat s)-\rho(x,s)\;}\tag{U}$$
 
 Exact for any churn size, costs only reward evaluations (no score, no $\nabla r$, no Laplacian — the
 exact kernel collapses all of it), and the sign is intuitive: noising off a reward peak loses $\rho$.
 
-**Denoising.** The exact flow map of the base ODE transports $q_{\hat s}\to q_{s'}$:
+**Move B.** The exact flow map of the base ODE transports $q_{\hat s}\to q_{s'}$:
 
 $$\boxed{\;\Delta\log w_{\mathrm{dn}} = \rho(x',s')-\rho(\hat x,\hat s)\;}\tag{D}$$
 
@@ -143,7 +143,7 @@ $$\boxed{\;\Delta\log w_{\mathrm{cycle}} = \rho(x_{i+1},s_{i+1})-\rho(x_i,s_i)\;
 
 Consequences: $\beta$ is never evaluated at $\hat\sigma$; without resampling the whole run telescopes to
 plain endpoint importance sampling ($\log w=\rho(x_M,0)-\rho(x_0,T)$) — **all of the steering power lives
-in resampling**; and churn (not denoising) is what makes resampling useful, since duplicated particles
+in resampling**; and Move A (not Move B) is what makes resampling useful, since duplicated particles
 re-diversify with variance $\varsigma_i^2$ per cycle.
 
 **Two proper weightings, two variance profiles.** Expanding $(U)$ for small $\varsigma^2$, the ratio
@@ -159,6 +159,8 @@ section).
 
 Guidance wants a drift term, not just reweighting. There are two places to put it — **on the denoising
 step**, or **as a mean shift of the churn kernel** — and these are not two options within one scheme:
+Guidance wants a drift term, not just reweighting. There are two places to put it — **on Move B's
+descent**, or **as a mean shift of Move A's kernel** — and these are not two options within one scheme:
 each commits the *whole cycle* to a different weighting scheme. Mixing them (twisting *and* guiding)
 reintroduces the reward Laplacian into the weight — see "Do not mix schemes" below.
 
@@ -186,8 +188,8 @@ The two schemes below differ only in *how they weight* that displacement.
 
 ### FKC scheme — guide the deterministic step
 
-Realize $(275_\alpha)$'s noise term via churn (exact), and its score-transport + guidance + weight terms
-via denoising — descend from $\hat\sigma_i$, add guidance explicitly, accumulate $(276_\alpha)$:
+Realize $(275_\alpha)$'s noise term via Move A (exact), and its score-transport + guidance + weight terms
+via Move B — descend from $\hat\sigma_i$, add guidance explicitly, accumulate $(276_\alpha)$:
 
 $$\frac{dx}{d\sigma} = -\sigma\nabla\log q_\sigma(x) - \frac{\varsigma_i^2}{2(\hat\sigma_i-\sigma_{i+1})}\nabla\rho(x,\sigma),\qquad \hat\sigma_i\to\sigma_{i+1},$$
 
@@ -195,7 +197,7 @@ $$\boxed{\;\Delta\log w_{\mathrm{cycle}} = \Big[-\partial_\sigma\rho + \langle\n
 
 No reward Laplacian: the cycle's diffusion coefficient $\tilde g=\alpha_{\mathrm{eff}}g$ (supplied by Move
 A) is what the Step-5 cancellation uses, even though the guided leg itself is deterministic — the
-Fokker–Planck bookkeeping is a property of the composite step. Churn carries no weight (bounded
+Fokker–Planck bookkeeping is a property of the composite step. Move A carries no weight (bounded
 variation weight). $\gamma$ sets guidance strength directly through $\alpha_{\mathrm{eff}}$ — turning up
 churn turns up guidance.
 
@@ -206,7 +208,7 @@ and append the exact Gaussian ratio — any $c$ stays exact, no Laplacian, no in
 
 $$\boxed{\;\Delta\log w_{\mathrm{up}} = \rho(\hat x,\hat s)-\rho(x,s) + \frac{-2\langle\hat x-x,c\rangle+\|c\|^2}{2\varsigma^2}\;}\tag{U'}$$
 
-Denoising stays unguided; $(D)$ is unchanged. At $c=c_{\mathrm{FKC}}$ this places the particle identically to
+Move B stays unguided; $(D)$ is unchanged. At $c=c_{\mathrm{FKC}}$ this places the particle identically to
 the FKC scheme — only the weight differs (martingale vs. bounded-variation). Because the shift is priced
 by an explicit density ratio rather than a Laplacian cancellation, it is **not** confined to
 $c_{\mathrm{FKC}}$: the variance-optimal twist is the *full* Girsanov shift $c=\varsigma^2\nabla\rho$
@@ -227,13 +229,38 @@ $$\boxed{\;\Delta\log w_{\mathrm{cycle}} = \rho(x_{i+1},s_{i+1})-\rho(x_i,s_i) +
 | needs $\nabla\log q,\partial_\sigma\rho$ in weight | yes | no — two reward evals |
 | admissible guidance strength | pinned to $c_{\mathrm{FKC}}$ | any $c$ |
 
+### Do not mix the schemes
+
+Keeping the exact ratio weights $(U)/(D)$ *and* adding a guidance drift to the descent is **not proper**:
+regrouping the sibling document's general statement for a $\tilde g=0$ leg reintroduces the reward
+Laplacian as an uncancelled flux term,
+
+$$\Delta\log w_{\mathrm{dn}} = \rho(x',s')-\rho(\hat x,\hat s) + \int_{\mathrm{leg}}\Big[\langle\nabla\log q_\sigma,u\rangle+\langle\nabla,u\rangle\Big]|d\sigma|,\tag{D'}$$
+
+with $\langle\nabla,u\rangle=\kappa\Delta\rho$ for $u=\kappa\nabla\rho$. In the FKC scheme this Laplacian is
+cancelled by Move A's noise ($\tilde g=\alpha_{\mathrm{eff}}g\ne0$); replace Move A's contribution with an
+exact ratio and that cancelling term is gone — the ratio still carries the Laplacian, but stochastically,
+and cannot cancel a deterministic term pathwise. $(D')$ is exact and useful for pricing *any* non-reward
+guidance field (e.g. AF3's `step_scale`, below) but is dominated as a steering method: mild guidance
+($\kappa=0.05$) is fine, but strong guidance ($\kappa\beta\approx0.75/\sigma$) collapsed a single leg's
+ESS to $0.003$.
+
+**Which scheme to use.** Want a guidance drift → **FKC scheme** (pinned by $\alpha_{\mathrm{eff}}$,
+$O(\Delta\sigma)$ bias, needs score in the weight). Want exactness and cheap weights → **ratio scheme**
+with $c=0$ (unguided) or the full shift $c=\varsigma^2\nabla\rho$ when ESS binds. Never both at once.
+
+Numerically confirmed (2-component 1-D GMM, quadratic reward, log-ramp $\beta_s$, 400-step geometric
+grid, $N=2{\times}10^5$): both schemes, weighted or resampled, reproduce the closed-form tilted GMM
+(mean $2.2807$, std $0.5298$) to $<10^{-2}$; $\gamma\to0$ collapses both to unguided endpoint importance
+sampling, as required.
+
 ---
 
 # Practical algorithm for VE schedules
 
 Two ways to steer a churn sampler with FKC. **Option A — steer the churn cycle itself:** keep the exact
 two-move cycle as proposal, weight by $(U)/(D)/(C)$ (or $(F)$/$(C')$ under guidance), resample at nodes.
-**Option B — effective-EM reading:** regroup (denoising$_i$, churn$_{i+1}$) as one EM step of the
+**Option B — effective-EM reading:** regroup (Move B$_i$, Move A$_{i+1}$) as one EM step of the
 $\alpha_{\mathrm{eff}}$-family and apply the sibling document's machinery directly. The two coincide only
 as $\gamma,\Delta\sigma\to0$. **Option A is the implementation** (exact noise placement, native Heun,
 cheaper or exact weights); **Option B is the tuning model** — use it to pick $\gamma$ for a target
@@ -280,7 +307,7 @@ absorbs $\alpha_{\mathrm{eff}}$ into `vs2`:
     # Weight FIRST, at the pre-move state (matches steered_reverse_sampling's weight_update convention)
     align = (grad_rho(x, sig) * sig * score(x, sig)).sum(-1)
     log_w = log_w + (-drho_dsigma(x, sig) + align) * (sig - sig_next)
-    x = x + torch.sqrt(vs2) * torch.randn_like(x)    # Churn: noise only, carries NO weight
+    x = x + torch.sqrt(vs2) * torch.randn_like(x)    # Move A: noise only, carries NO weight
     rate = vs2 / (2 * (sig_hat - sig_next))
     d1 = -sig_hat * score(x, sig_hat) - rate * grad_rho(x, sig_hat)
     xm = x + (sig_next - sig_hat) * d1
@@ -301,11 +328,11 @@ state. A new entry point (`churn_steered_reverse_sampling`) is therefore needed.
 
 ## AF3 knobs under steering
 
-- **`step_scale` $\eta=1.5$** stretches denoising beyond the base flow, biasing the ratio-scheme weights;
+- **`step_scale` $\eta=1.5$** stretches Move B beyond the base flow, biasing the ratio-scheme weights;
   $(D')$ prices the mismatch exactly since it's a non-reward guidance field
   ($u=(\eta-1)\sigma\nabla\log q_\sigma$). Verified on one leg: uncorrected $\eta=1.5$ contracts the
   marginal (std $2.59$ vs. base $2.86$); corrected, $2.87$. $\eta=1$ remains the cheap default.
-- **`noise_scale` $\lambda=1.003$** makes churn's variance $\lambda^2\varsigma^2\ne\varsigma^2$; set
+- **`noise_scale` $\lambda=1.003$** makes Move A's variance $\lambda^2\varsigma^2\ne\varsigma^2$; set
   $\lambda=1$, or append the analogous one-line Gaussian correction.
 - **The churn band** ($[S_{\mathrm{tmin}},S_{\mathrm{tmax}}]$) doubles as an ESS-cost control (weight
   variance peaks where $\beta_s$ peaks, near the data end, exactly where the band already turns churn
@@ -322,5 +349,5 @@ $\sum\beta_s^2\|\nabla r\|^2\varsigma_i^2$ between resamples (largely cancelled 
 scheme pays no martingale cost but accumulates $O(\Delta\sigma)$ bias instead. Tune $\gamma$ jointly with
 `ess_threshold` — more churn tolerates and needs more frequent resampling. $\gamma\to0$ is the collapse
 regime (and, under FKC, the no-steering regime), not a safe default; large $\gamma$ is safe for marginals
-under exact transport (churn is exact at any $\gamma$), but it costs ESS and can amplify denoising's
+under exact transport (Move A is exact at any $\gamma$), but it costs ESS and can amplify Move B's
 numerical transport error — if guidance is too weak, add churn, not gain.
