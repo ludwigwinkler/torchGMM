@@ -4,6 +4,12 @@ The thing worth testing here is the **stochastic process**, not the plumbing. A 
 assertion passes on a sampler that integrates the wrong drift. A Wasserstein check at
 intermediate times does not.
 
+The following test patterns are very important:
+- For each schedule write a test class that tests the **marginal family** `{p_t}` at intermediate times, not just the endpoints.
+- Implement the individual drifts, diffusion coefficients, and transition kernels as small, independently-testable functions that flow into the sampler. This makes the test self contained and easier to understand.
+- Use ESS triggered resampling and ESS=num_steps+1 to test the same marginal family with and without resampling. The two must match. In particular, the resampling only at the end tests whether the weights are correctly accumulated over time and serves a gold standard test of sorts.
+- Test hyperparameters like reward center, ess_threshold, and churn across a few values should be implemented as orthogonal @pytest.mark.parametrize parameters, not as separate test classes. The marginal tests are the same for all of them.
+
 ## The core pattern
 
 Every sampler test is the same three lines of intent:
@@ -23,6 +29,44 @@ for t_idx in range(n_steps)[::5]:
 Endpoint-only checks are not enough: a sampler can drift off the marginal path in the
 middle and be pulled back by the score near `t=0`. The intermediate times are where the
 bugs live — wrong `dt` sign, missing `1/2` on `g²`, a schedule derivative off by a factor.
+
+## Sampler-test formalism
+
+Treat the analytic marginal family `{p_t}` as the oracle and each sampler as an operator
+that claims to preserve that family:
+
+1. **Given:** a schedule, an analytic `GMM`, a monotone time grid, and
+   `X_0 ~ p_{t[0]}`. Prefer `gmm.sample(..., t=t[0])`; use `randn` only when the chosen
+   endpoint is demonstrably close to `N(0, I)` and document that approximation.
+2. **Apply:** the operator under test to obtain `X[i]` for the whole time grid.
+3. **Observe:** at regular interior checkpoints, compare the empirical law of `X[i]`
+   with `p_{t[i]}` independently for every batch member.
+4. **Accept:** the global transport error (W1) and, where useful, local density error
+   (`max(abs(hist - target))`) stay below explicit tolerances at every checkpoint.
+
+This gives the common invariant
+
+```text
+X[0] ~ p_t[0]  and  X[i+1] = K_i(X[i])  implies  X[i] ~ p_t[i] for all i.
+```
+
+Instantiate the same invariant for increasing-grid forward ODE/SDE integration,
+decreasing-grid reverse ODE/SDE integration, exact one-jump transitions `t -> s`, and
+churn splitting. Parametrize **this invariant** across schedules and stochasticity
+parameters rather than duplicating low-value plumbing tests.
+
+Add small metamorphic tests where they express an exact operator identity:
+
+- `trajectory[0] == x`: integration preserves the supplied initial state.
+- ODE runs with the same input are identical.
+- `churn=0` is the probability-flow ODE.
+- A valid SDE-to-ODE handover remains on the same `{p_t}` path on both sides of the seam.
+- `Schedule.transition(x_t, t, s)` lands on `p_s` in one jump for any `s > t`, not merely
+  for infinitesimal gaps.
+
+Test temporal preconditions separately and cheaply: forward grids must increase, reverse
+and churn grids must decrease, transition kernels require `s > t`, and grids must be
+finite, in range, and contain at least two points.
 
 ## W1 helpers
 
@@ -65,6 +109,10 @@ ESS trace analytically — no `manual_seed` needed, so it can't flake under xdis
 
 - Keep `t` away from schedule singularities: `BetaSchedule` velocity blows up at `t=0`,
   `LinearSchedule` at `t=1` → integrate over `[eps, 1−eps]`.
+- Make the measurement scale follow the marginal. For wide VE/Karras marginals use
+  `radius = max(5, 6 * sigma_t)` and `tol = 0.08 * (1 + sigma_t)`; keep the bin count fixed
+  so grid resolution scales with the distribution. A fixed narrow grid can normalize an
+  off-grid target into a meaningless statistic.
 - Sample counts: ~10k for unweighted W1 at tol 0.08, ~5k particles for steering. Below that the
   Monte-Carlo error in W1 is comparable to the tolerance and the test flakes.
 - Mark anything running a full SDE sweep `@pytest.mark.slow`.

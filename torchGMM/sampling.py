@@ -89,9 +89,77 @@ def reverse_sampling(
     return euler_maruyama(drift, diffusion, x, t)
 
 
+@jaxtyped(typechecker=beartype)
+def reverse_churn_sampling(
+    velocity: Callable,
+    transition: Callable,
+    x: Float[Tensor, "*batch D"],
+    t: Float[Tensor, " T"],
+    churn: float = 1.0,
+) -> Float[Tensor, "T *batch D"]:
+    """Churn sampling (EDM Alg. 2): re-noise to t+h, then transport back past it to t+dt.
+
+    Not an SDE discretisation but an operator splitting, which is why it is a separate
+    function rather than an integrator swapped into `reverse_sampling`. Each step composes
+    two operators, each of which maps a distribution to a distribution on its own:
+
+      1. `transition(x, t, t+h)` — the exact forward kernel, h = churn·|dt|. Unlike an
+         Euler step of the forward SDE it maps p_t onto p_{t+h} exactly, for any h. That
+         exactness is the point: with a first-order churn the whole scheme collapses to
+         reverse-SDE Euler-Maruyama up to O(h^{3/2}) and the splitting buys nothing.
+      2. `velocity(x, t+h) * (t + dt - (t+h))` — probability-flow transport, spanning
+         -(|dt| + h) since it has to undo the churn as well as advance one grid step.
+
+    The velocity is evaluated at the *reheated* time t+h, not at t: after the churn the
+    state is distributed according to p_{t+h}, so the score at t is the wrong one for it
+    (docs/fkc_churn_steering.md §3.1). Both are O(h) globally, but the mismatch is a full
+    step wide at churn=1 and costs measurable accuracy at low step counts.
+
+    Both preserve the marginal family, so the composition lands on p_{t+dt}. Contrast
+    `reverse_sampling`, where drift and diffusion are the two *terms* of one SDE, added at
+    the same t over the same dt.
+
+    Reverse-only: on an increasing grid the churn would run with the direction of travel
+    instead of against it, and at churn=1 the transport span collapses to zero. Forward
+    noising needs no sampler at all — `schedule.transition` jumps t -> s in a single draw.
+
+    Args:
+        velocity:   (x, t) -> [*batch, D]; the probability-flow velocity, e.g. `gmm.velocity`.
+                    NOT the reverse SDE drift f - g²s — the churn already supplies the
+                    stochasticity, so a score-corrected drift double-counts it.
+        transition: (x, t, s) -> [*batch, D]; the exact forward kernel, i.e. `schedule.transition`
+        x:          Initial state [*batch, D]
+        t:          1D strictly decreasing time grid in [0, 1], >= 2 points
+        churn:      Churn strength as a multiple of the step size, h = churn·|dt|. This is
+                    EDM's S_churn/N knob: 0 is the deterministic probability-flow ODE, 1
+                    re-noises a full step back before transporting two steps down, and >1
+                    over-churns (the transport then spans more than two steps). Values
+                    above 1 can push t+h past 1 for the first steps, where it is clamped
+                    and the transport span shrinks to match.
+
+    Returns:
+        Trajectory [T, *batch, D]
+    """
+    _validate_time_grid(t)
+    if not torch.all(t[1:] < t[:-1]):
+        raise ValueError("t must be strictly decreasing for reverse_churn_sampling")
+    if churn < 0:
+        raise ValueError(f"churn must be non-negative, got {churn}")
+    trajectory = [x.clone()]
+    for t_curr, dt in zip(t[:-1], t[1:] - t[:-1]):
+        t_hat = (t_curr + churn * dt.abs()).clamp(max=1.0)
+        # t̂ == t whenever churn == 0, or when the clamp bites at t == 1; both mean no churn.
+        if t_hat > t_curr:
+            x = transition(x, t_curr, t_hat)  # exact forward kernel, t -> t̂
+        x = x + velocity(x, t_hat) * (t_curr + dt - t_hat)  # PF-ODE transport t̂ -> t+dt
+        trajectory.append(x.clone())
+    return torch.stack(trajectory)
+
+
 def _ess_ratio(log_w: torch.Tensor) -> float:
     lw = log_w - torch.logsumexp(log_w, 0)
-    return (torch.exp(-torch.logsumexp(2 * lw, 0)) / log_w.shape[0]).item()
+    ess = torch.exp(-torch.logsumexp(2 * lw, 0)) / log_w.shape[0]
+    return ess.clamp(0.0, 1.0).item()
 
 
 def _systematic_resample(log_w: torch.Tensor) -> torch.Tensor:
@@ -177,6 +245,181 @@ def steered_reverse_sampling(
         if should_resample:
             idx = _systematic_resample(log_w)
             x = x[idx]
+            log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+
+        trajectory.append(x.clone())
+        weight_history.append(_normalized_weights(log_w))
+
+    # Final resample according to accumulated weights
+    idx = _systematic_resample(log_w)
+    x = x[idx]
+    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+    trajectory[-1] = x.clone()
+    weight_history[-1] = _normalized_weights(log_w)
+
+    return torch.stack(trajectory), ess_history, torch.stack(weight_history)
+
+
+@jaxtyped(typechecker=beartype)
+def steered_reverse_churn_sampling(
+    drift: Callable,
+    transition: Callable,
+    weight_update: Callable | None,
+    x: Float[Tensor, "N *rest D"],
+    t: Float[Tensor, " T"],
+    churn: float = 1.0,
+    ess_threshold: float | int = 0.5,
+    beta: Callable | None = None,
+    energy: Callable | None = None,
+) -> tuple[Float[Tensor, "T N *rest D"], list[float], Float[Tensor, "T N"]]:
+    """FKC-steered churn sampling: `reverse_churn_sampling` run as an SMC particle filter.
+
+    The signature mirrors `steered_reverse_sampling` one-for-one, with `transition` in
+    place of `diffusion`: in a churn step the stochasticity comes from re-noising with the
+    exact forward kernel rather than from an additive Brownian increment, so that is the
+    slot it occupies. Everything else — the `ess_threshold` contract, the
+    `(trajectory, ess_history, weight_history)` return — is identical.
+
+    Each step re-noises to t̂ with `transition`, then transports `drift` from t̂ to t+dt.
+    Both operators preserve the marginal family, so the composition lands on p_{t+dt};
+    the SMC layer then retargets it onto p_t(x) ∝ q_t(x)·exp(ρ_t(x)).
+
+    **Guidance is the caller's, not the sampler's.** `drift` is the probability-flow
+    velocity, and a reward-guided flow is simply that velocity plus a guidance field —
+    built by the caller exactly as `guided_drift` is built for `steered_reverse_sampling`.
+    The sampler never needs to know which part is guidance, because whatever compensation
+    the guidance requires belongs in `weight_update`, which the caller also owns.
+
+    **Two ways to weight.** Exactly one is required. `beta` plus `energy` define the
+    log tilt as ρ_t(x) = -β_t U_t(x), and alone supply both exact operator-local
+    tilt-ratio increments. `weight_update` alone supplies the continuous-time FKC
+    increment over the grid step. They are distinct change-of-measure constructions and
+    must not be combined.
+
+    `weight_update(x, t, dt) -> [N]` is evaluated at the *reheated* pair (x̂, t̂), since
+    that is where the transport starts and where the score is taken. Without an energy tilt,
+    it is the continuous-time route, identical in form and meaning to
+    `steered_reverse_sampling`'s: it receives the grid step `dt = t_next - t_curr`. The
+    churn splitting's continuous limit is the standard λ-family reverse SDE at λ=√churn,
+    and the Prop. D.6 weight for that generator is **independent of churn** (see
+    `docs/fkc_churn_steering.md` §7) — so the very same `fkc_weight_update` closure works
+    here and in `steered_reverse_sampling`, at any churn strength. It always receives the
+    signed grid step `dt = t_next - t_curr`.
+
+    `beta(t)` plus `energy(x, t) -> [N]` is the discrete route, native to the splitting:
+    because the churn kernel already maps q_t onto q_{t+dt} exactly, the entire correction is the
+    endpoint difference
+
+        Δlog w = -β_{t+dt}U_{t+dt}(x_{t+dt}) + β_tU_t(x_t),
+
+    with no β̇_t, no ∂_t r, no reward Laplacian, no score-alignment term and no reward
+    gradient at all — so a denoiser inside `energy` is never backpropagated through. The
+    sampler always applies the exact transition-ratio weight
+    ρ_{t̂}(x̂) − ρ_t(x). With no `weight_update`, it follows with the deterministic-leg
+    tilt ratio ρ_{t+dt}(x_{t+dt}) − ρ_{t̂}(x̂), so the two telescope to the full
+    endpoint difference. With `weight_update`, that second ratio is omitted because the
+    FKC callback owns the deterministic leg. ρ is carried across steps and gathered on a
+    resample.
+
+    Energy-derived tilt increments are applied after their respective operators, but
+    resampling happens once per integration step after both halves.
+
+    Args:
+        drift:         (x, t) -> [N, *rest, D]; the probability-flow velocity, e.g.
+                       `gmm.velocity`, plus any guidance field the caller wants. NOT the
+                       reverse-SDE drift f − g²s — the churn supplies the stochasticity,
+                       so a score-corrected drift double-counts it.
+        transition:    (x, t, s) -> [N, *rest, D]; exact forward kernel, i.e. `schedule.transition`
+        weight_update: (x, t, dt) -> [N] incremental log weight, evaluated at the reheated
+                       pair (x̂, t̂), with the signed grid step `dt = t_next - t_curr`.
+        x:             [N, *rest, D] initial state; N = number of particles
+        t:             1D strictly decreasing time grid in [0, 1], >= 2 points
+        churn:         Churn strength as a multiple of the step size, h = churn·|dt|; see
+                       `reverse_churn_sampling`. 0 makes every step a deterministic PF-ODE
+                       step and the churn contributes no stochasticity at all.
+        ess_threshold: Resampling strategy, identical to `steered_reverse_sampling`:
+                       adaptive when 0 < ess_threshold < 1 (resample once ESS/N drops
+                       below it), fixed-interval when ess_threshold >= 1 (a whole number
+                       of steps). A final resample always fires after the last step.
+        beta:          (t) -> scalar tilt strength β_t. Must be passed together with
+                       `energy`; together they define ρ_t(x) = -β_t U_t(x).
+        energy:        (x, t) -> [N] energy U_t(x), reduced over `*rest` and `D`.
+                       Must be passed together with `beta`; alternative to `weight_update`,
+                       see above.
+
+    Returns:
+        trajectory:     [T, N, *rest, D]
+        ess_history:    ESS/N at each step, len = len(t) - 1
+        weight_history: [T, N] normalized particle weights aligned with trajectory;
+                        rows sum to 1 and reset to uniform after resampling.
+    """
+    _validate_time_grid(t)
+    if not torch.all(t[1:] < t[:-1]):
+        raise ValueError("t must be strictly decreasing for steered_reverse_churn_sampling")
+    if (beta is None) != (energy is None):
+        raise ValueError("beta and energy must be passed together")
+    if weight_update is not None and energy is not None:
+        raise ValueError("weight_update and beta plus energy are mutually exclusive")
+    if weight_update is None and energy is None:
+        raise ValueError("pass weight_update or beta plus energy — otherwise nothing steers")
+    if churn < 0:
+        raise ValueError(f"churn must be non-negative, got {churn}")
+    if ess_threshold <= 0:
+        raise ValueError(f"ess_threshold must be positive, got {ess_threshold}")
+    if ess_threshold >= 1 and ess_threshold != int(ess_threshold):
+        raise ValueError(
+            f"ess_threshold >= 1 selects fixed-interval resampling and must be a "
+            f"whole number of steps, got {ess_threshold}"
+        )
+    interval_mode = ess_threshold >= 1
+    resample_every = int(ess_threshold) if interval_mode else 1  # unused when not interval_mode
+
+    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+    # ρ at the current state, carried across steps: the endpoint difference needs the
+    # ancestor's tilt, and recomputing it would double the cost of an `energy` that
+    # backprops through an unrolled denoiser. On a resample it is gathered, not re-evaluated.
+    rho = None if energy is None else -beta(t[0]) * energy(x, t[0])
+    trajectory = [x.clone()]
+    weight_history = [_normalized_weights(log_w)]
+    ess_history: list[float] = []
+
+    for step, (t_curr, t_next) in enumerate(zip(t[:-1], t[1:])):
+        t_hat = (t_curr + churn * (t_next - t_curr).abs()).clamp(max=1.0)
+
+        # ---- churn half: exact forward kernel t -> t̂ ----
+        if t_hat > t_curr:
+            x = transition(x, t_curr, t_hat)
+            if energy is not None:
+                rho_hat = -beta(t_hat) * energy(x, t_hat)
+                log_w = log_w + rho_hat - rho
+        else:
+            rho_hat = rho
+
+        # ---- deterministic half: probability-flow transport t̂ -> t+dt ----
+        # The weight is taken at the reheated pair (x̂, t̂) — where the transport starts
+        # and where the score is evaluated — mirroring the pre-step (x, t) of the
+        # Euler-Maruyama sampler.
+        if weight_update is not None:
+            log_w = log_w + weight_update(x, t_hat, t_next - t_curr)
+        x = x + drift(x, t_hat) * (t_next - t_hat)
+
+        if energy is not None:
+            rho_next = -beta(t_next) * energy(x, t_next)
+            log_w = log_w + rho_next - rho_hat
+            rho = rho_next
+
+        ess = _ess_ratio(log_w)
+        ess_history.append(ess)
+
+        if interval_mode:
+            should_resample = (step + 1) % resample_every == 0
+        else:
+            should_resample = ess < ess_threshold
+
+        if should_resample:
+            idx = _systematic_resample(log_w)
+            x = x[idx]
+            rho = None if rho is None else rho[idx]
             log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
 
         trajectory.append(x.clone())

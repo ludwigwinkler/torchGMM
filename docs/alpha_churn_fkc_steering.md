@@ -157,6 +157,8 @@ section).
 
 ## Adding the guidance drift
 
+Guidance wants a drift term, not just reweighting. There are two places to put it — **on the denoising
+step**, or **as a mean shift of the churn kernel** — and these are not two options within one scheme:
 Guidance wants a drift term, not just reweighting. There are two places to put it — **on Move B's
 descent**, or **as a mean shift of Move A's kernel** — and these are not two options within one scheme:
 each commits the *whole cycle* to a different weighting scheme. Mixing them (twisting *and* guiding)

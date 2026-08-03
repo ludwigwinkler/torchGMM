@@ -9,7 +9,7 @@ Package-level guidance for working inside this directory.
 | `__init__.py` | Public re-exports only — no logic |
 | `gmm.py` | `GMM` and `Conditional` classes |
 | `schedule.py` | `Schedule`, `BetaSchedule`, `LinearSchedule`, `VESchedule`, `KarrasSchedule` |
-| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `steered_reverse_sampling` |
+| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `reverse_churn_sampling`, `steered_reverse_sampling`, `steered_reverse_churn_sampling` |
 
 ## Shape convention
 
@@ -50,7 +50,68 @@ Subclass `Schedule`, implement the four abstract methods, add `@jaxtyped(typeche
 
 ## Adding a new sampling function
 
-Follow the pattern in `sampling.py`: validate the time grid with `_validate_time_grid`, delegate to `euler_maruyama`, annotate `x: Float[Tensor, "*batch D"]` and `t: Float[Tensor, " T"]`.
+Follow the pattern in `sampling.py`: validate the time grid with `_validate_time_grid`, check the
+direction, delegate to `euler_maruyama`, annotate `x: Float[Tensor, "*batch D"]` and
+`t: Float[Tensor, " T"]`.
+
+A sampler that is *not* an Euler-Maruyama discretisation gets its own function rather than an
+integrator hook on the existing ones — `reverse_churn_sampling` is the example. Its two callables
+are complete operators (`schedule.transition`, `gmm.velocity`), not the drift/diffusion terms of a
+single SDE, so it names them for what they are and owns its own loop. Take the callables off the
+`Schedule`/`GMM` directly; don't capture the schedule object wholesale or wrap it in a factory.
+
+The velocity in both churn samplers is evaluated at the **reheated** time `t̂`, not at `t`: after
+the churn the state is distributed according to `p_t̂`, so the score at `t` is the wrong one for it
+(`docs/fkc_churn_steering.md` §3.1).
+
+## Steering: two samplers, two weight contracts
+
+`steered_reverse_sampling` takes an *incremental* `weight_update(x, t, dt) -> [N]` because it
+discretises a continuous-time SDE, so the weight is the Prop. D.6 integrand times `dt`.
+
+`steered_reverse_churn_sampling` mirrors that signature one-for-one, with `transition` in
+place of `diffusion`: a churn step gets its stochasticity from re-noising with the exact
+forward kernel rather than an additive Brownian increment, so that is the slot it takes.
+
+```python
+steered_reverse_churn_sampling(drift, transition, weight_update, x, t, churn=1.0, ...)
+steered_reverse_churn_sampling(drift, transition, None, x, t, beta=beta, energy=r, ...)
+steered_reverse_sampling(drift, diffusion, weight_update, x, t, ...)
+```
+
+Guidance is the caller's, never the sampler's. `drift` is the probability-flow velocity plus
+whatever guidance field you want, built exactly as `guided_drift` is built for the
+Euler-Maruyama sampler; whatever compensation that guidance needs goes into `weight_update`,
+which you also own. Do not pass the reverse-SDE drift `f − g²s` — the churn already supplies
+the stochasticity and a score-corrected drift double-counts it.
+
+Two mutually exclusive weight contracts:
+
+- `weight_update(x, t, dt) -> [N]` — the continuous-time Prop. D.6 form, evaluated at the
+  *reheated* pair `(x̂, t̂)`. Because the FKC weight is independent of churn strength
+  (`docs/fkc_churn_steering.md` §7), the very same closure steers both samplers. Only the
+  *drift* carries κ, and in two places: the magic constant uses the effective diffusion,
+  `a = β·κ·g²/2`, and the field is divided by `(1+κ)` because the transport spans
+  `−(1+κ)|dt|`. Both collapse to the familiar form at κ=1, so an implementation that drops
+  the κ passes at `churn=1` and fails either side of it — `TestChurnSteeringWithEulerMaruyamaWeight`
+  sweeps churn precisely to catch that.
+- `beta(t)` plus `energy(x, t) -> [N]` — the discrete route native to the splitting. They
+  define the tilt as `ρ_t(x) = -β_t U_t(x)`. The churn kernel already maps
+  `q_t` onto `q_{t+dt}` exactly, so the whole correction is the endpoint
+  difference `ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t)`: no `β̇_t`, no `∂_t r`, no reward Laplacian, no
+  score-alignment term, and no reward gradient at all, so a denoiser inside `energy` is
+  never backpropagated through. The sampler materializes this as the exact churn update
+  `ρ_{t̂}(x̂) − ρ_t(x)` and, when used alone, the alpha=0 deterministic update
+  `ρ_{t+dt}(x_{t+dt}) − ρ_{t̂}(x̂)`, which telescope to the endpoint difference. Exact at
+  finite step size rather than only in the limit.
+
+`ρ` is carried across steps and *gathered* on a resample rather than re-evaluated — `energy`
+may be expensive, and recomputing the ancestor's tilt would double its cost per step. A nonzero
+churn half evaluates a fresh reheated energy before the deterministic endpoint energy;
+the zero-churn path skips that redundant midpoint evaluation.
+
+Energy-derived tilt updates happen after their respective operators, but weighting and resampling decisions
+remain once per integration step after *both* halves. Do not resample at the reheated state.
 
 ## What NOT to do
 

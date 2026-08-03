@@ -42,12 +42,36 @@ class Schedule(torch.nn.Module):
         raise NotImplementedError
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(
-        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
-    ) -> Float[Tensor, "*batch D"]:
+    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
         """Forward SDE drift f(x,t) = (α̇_t / α_t) x. t broadcasts over x's batch dims."""
         t = self._clamp_t(t)
         return (self.get_dalpha_dt(t) / self.get_alpha_t(t)).unsqueeze(-1) * x
+
+    @jaxtyped(typechecker=beartype)
+    def transition(
+        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"], s: Float[Tensor, "*t"]
+    ) -> Float[Tensor, "*batch D"]:
+        """Exact forward transition kernel q(x_s | x_t) for s > t — a whole operator, not a term.
+
+        x_s = (α_s/α_t) x_t + √(σ_s² − (α_s/α_t)² σ_t²) η
+
+        Derived in docs/schedule.md: normalising by the signal, Y_t = x_t/α_t = x_0 + λ_t ε
+        with λ_t = σ_t/α_t, makes every schedule variance-exploding, so the transition is
+        plain Gaussian additivity. Unlike an Euler step of the forward SDE this maps p_t
+        onto p_s exactly, for any gap s − t.
+
+        Requires s > t elementwise: the kernel only ever adds noise. Running it backwards
+        would need √(negative) — the injected variance σ_s² − (α_s/α_t)²σ_t² is non-negative
+        exactly when the SNR is monotone, i.e. when s is the noisier of the two times.
+        """
+        if not torch.all(s > t):
+            raise ValueError("transition only noises forward: s must be > t elementwise")
+        t, s = self._clamp_t(t), self._clamp_t(s)
+        alpha_t, sigma_t = self.get_alpha_t_sigma_t(t)
+        alpha_s, sigma_s = self.get_alpha_t_sigma_t(s)
+        ratio = alpha_s / alpha_t
+        std = torch.sqrt(sigma_s**2 - ratio**2 * sigma_t**2)
+        return ratio.unsqueeze(-1) * x + std.unsqueeze(-1) * torch.randn_like(x)
 
     @jaxtyped(typechecker=beartype)
     def diffusion_coeff(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
@@ -122,9 +146,7 @@ class BetaSchedule(Schedule):
         return self.get_alpha_t(t), self.get_sigma_t(t)
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(
-        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
-    ) -> Float[Tensor, "*batch D"]:
+    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
         """f(x,t) = -½ β(t) x. t broadcasts over x's batch dims."""
         return -0.5 * self.beta(t).unsqueeze(-1) * x
 
@@ -164,9 +186,7 @@ class LinearSchedule(Schedule):
         return torch.ones_like(t)
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(
-        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
-    ) -> Float[Tensor, "*batch D"]:
+    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
         """f(x,t) = -x / (1 − t). t broadcasts over x's batch dims."""
         t = self._clamp_t(t)
         return -x / (1 - t).unsqueeze(-1)
@@ -214,9 +234,7 @@ class VESchedule(Schedule):
         return self.get_sigma_t(t) * self.log_ratio
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(
-        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
-    ) -> Float[Tensor, "*batch D"]:
+    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
         """f(x,t) = 0 — VE has no drift."""
         return torch.zeros_like(x)
 
@@ -277,17 +295,10 @@ class KarrasSchedule(Schedule):
     def get_dsigma_dt(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
         """dσ/dt = σ_data · ρ · u(t)^{ρ−1} · (σ_max^{1/ρ} − σ_min^{1/ρ})"""
         u = self._u_min + t * (self._u_max - self._u_min)
-        return (
-            self.sigma_data
-            * self.rho
-            * (self._u_max - self._u_min)
-            * u ** (self.rho - 1)
-        )
+        return self.sigma_data * self.rho * (self._u_max - self._u_min) * u ** (self.rho - 1)
 
     @jaxtyped(typechecker=beartype)
-    def forward_drift(
-        self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]
-    ) -> Float[Tensor, "*batch D"]:
+    def forward_drift(self, x: Float[Tensor, "*batch D"], t: Float[Tensor, "*t"]) -> Float[Tensor, "*batch D"]:
         """f(x,t) = 0 — pure VE process."""
         return torch.zeros_like(x)
 

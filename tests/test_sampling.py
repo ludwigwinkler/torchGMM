@@ -1,21 +1,26 @@
+from pathlib import Path
+
 import pytest
 import torch
 from conftest import get_local_device
-
+from test_steering import _weighted_wasserstein1, plot_marginal_density_comparison
 from torchGMM.gmm import GMM
-from torchGMM.sampling import forward_sampling, reverse_sampling
+from torchGMM.sampling import forward_sampling, reverse_churn_sampling, reverse_sampling
 from torchGMM.schedule import BetaSchedule, KarrasSchedule, LinearSchedule
+
+PLOT = True
+PLOT_DIR = Path(__file__).parent / "plots"
 
 torch.set_printoptions(sci_mode=False)
 
 
 @pytest.fixture
-def gmm_model():
+def gmm_model(schedule=BetaSchedule()):
     """Fixture for the GMM model used in diffusion tests."""
     mu = torch.tensor([-2, 0, 2]).reshape(1, 3, 1)
     sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
     weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
-    return GMM(mu=mu, sigma=sigma, weight=weight)
+    return GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
 
 @pytest.fixture
@@ -27,19 +32,19 @@ def batched_gmm_model():
     return GMM(mu=mu, sigma=sigma, weight=weight)
 
 
-def _histogram_setup():
-    """51 evenly-spaced bins over [-5, 5]. Returns (x_grid [51,1,1], bin_edges [52])."""
-    x_grid = torch.linspace(-5, 5, 51).reshape(-1, 1, 1)
+def _histogram_setup(radius: float = 5.0):
+    """51 evenly-spaced bins over [-radius, radius]. Returns (x_grid [51,1,1], bin_edges [52]).
+
+    The default radius covers the fixed-σ schedules. Widen it for marginals that leave the
+    window — the default `KarrasSchedule` reaches σ_max = 160, and against a unit grid its
+    whole distribution sits off-grid and every histogram statistic is meaningless. Bin count
+    is fixed, so resolution stays proportional to the marginal rather than absolute.
+    """
+    x_grid = torch.linspace(-radius, radius, 51).reshape(-1, 1, 1)
     dx = x_grid[1, 0, 0] - x_grid[0, 0, 0]
     x_flat = x_grid.squeeze()
     bin_edges = torch.cat([(x_flat[0] - dx / 2).unsqueeze(0), x_flat + dx / 2])
     return x_grid, bin_edges
-
-
-def _karras_schedule():
-    """Numerically stable Karras schedule for histogram-based marginal tests."""
-    return KarrasSchedule(sigma_min=0.01, sigma_max=1.0, rho=7.0, sigma_data=1.0)
-
 
 def _wasserstein1(samples, ground_truth_gmm, t, x_grid, bin_edges, batch_index=0):
     """Grid-based 1D W1 between empirical samples and `ground_truth_gmm.log_prob(x_grid, t)`."""
@@ -55,6 +60,11 @@ def _wasserstein1(samples, ground_truth_gmm, t, x_grid, bin_edges, batch_index=0
     hist_cdf = hist_cdf / hist_cdf[-1]
     target_cdf = target_cdf / target_cdf[-1]
     return (hist_cdf - target_cdf).abs().sum() * dx
+
+
+def _plot_dir(*parts):
+    """Return plots/<test_file>/<TestClass>/<test_function>/... output path."""
+    return PLOT_DIR.joinpath(*parts)
 
 
 class TestForwardSampling:
@@ -87,7 +97,7 @@ class TestForwardSampling:
         for t_idx in range(n_steps)[::10]:
             t_ = t[t_idx]
             target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)  # [nsteps]
-            import matplotlib.pyplot as plt
+            
 
             # plt.plot(x_grid[:, 0, 0], target, label="Target")
             # plt.hist(
@@ -115,7 +125,7 @@ class TestForwardSampling:
         mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
-        schedule = _karras_schedule()
+        schedule = KarrasSchedule()
         gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         n_samples, n_steps = 10_000, 200
@@ -126,20 +136,14 @@ class TestForwardSampling:
 
         assert trajectory.shape == (n_steps, n_samples, 1, 1)
 
-        x_grid, bin_edges = _histogram_setup()
         for t_idx in range(n_steps)[::10]:
             t_ = t[t_idx]
-            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
-            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
-            hist_dev = (hist - target).abs().max().item()
+            sigma_t = schedule.get_sigma_t(t_)
+            x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_t.item()))
             w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
-            assert hist_dev < 0.05, (
-                f"KarrasSchedule forward ODE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
-            )
-            assert w1 < 0.08, (
-                f"KarrasSchedule forward ODE @ t={t_:.3f}: W1 {w1:.3f}, "
-                f"max histogram deviation {hist_dev:.3f}"
-            )
+            # Tolerance tracks the marginal's own scale, as in test_steering.py.
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, f"KarrasSchedule forward ODE @ t={t_:.3f}: W1 {w1:.4f} >= {tol:.4f}"
 
     @pytest.mark.slow
     @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule])
@@ -208,7 +212,7 @@ class TestForwardSampling:
         mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
-        schedule = _karras_schedule()
+        schedule = KarrasSchedule()
         gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         n_samples, n_steps = 50_000, 400
@@ -219,20 +223,14 @@ class TestForwardSampling:
         assert trajectory.shape == (len(t), n_samples, 1, 1)
         assert torch.allclose(trajectory[0], x, atol=1e-5)
 
-        x_grid, bin_edges = _histogram_setup()
         for t_idx in range(t.numel())[::10]:
             t_ = t[t_idx]
-            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
-            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
-            hist_dev = (hist - target).abs().max().item()
+            sigma_t = schedule.get_sigma_t(t_)
+            x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_t.item()))
             w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
-            assert hist_dev < 0.05, (
-                f"KarrasSchedule forward SDE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
-            )
-            assert w1 < 0.08, (
-                f"KarrasSchedule forward SDE @ t={t_:.3f}: W1 {w1:.3f}, "
-                f"max histogram deviation {hist_dev:.3f}"
-            )
+            # Tolerance tracks the marginal's own scale, as in test_steering.py.
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, f"KarrasSchedule forward SDE @ t={t_:.3f}: W1 {w1:.4f} >= {tol:.4f}"
 
 
 class TestReverseSampling:
@@ -306,10 +304,12 @@ class TestReverseSampling:
         mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
-        schedule = _karras_schedule()
+        schedule = KarrasSchedule()
         gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
-        n_samples, n_steps = 10_000, 200
+        # 400 steps, as in the other Karras tests: the default schedule spans
+        # σ ∈ [4e-4, 160], and 200 Euler steps leave a visible first-order error near t=0.
+        n_samples, n_steps = 10_000, 400
         x = gmm.sample(shape=n_samples, t=1 - self.eps)  # [N, B=1, D=1]
         t = torch.linspace(1 - self.eps, self.eps, n_steps)
         trajectory = reverse_sampling(gmm.velocity, None, x, t)  # [T, N, B=1, D=1]
@@ -319,20 +319,14 @@ class TestReverseSampling:
         trajectory2 = reverse_sampling(gmm.velocity, None, x, t)
         torch.testing.assert_close(trajectory, trajectory2)
 
-        x_grid, bin_edges = _histogram_setup()
         for t_idx in range(n_steps)[::5]:
             t_ = t[t_idx]
-            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
-            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
-            hist_dev = (hist - target).abs().max().item()
+            sigma_t = schedule.get_sigma_t(t_)
+            x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_t.item()))
             w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
-            assert hist_dev < 0.05, (
-                f"KarrasSchedule reverse ODE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
-            )
-            assert w1 < 0.08, (
-                f"KarrasSchedule reverse ODE @ t={t_:.3f}: W1 {w1:.3f}, "
-                f"max histogram deviation {hist_dev:.3f}"
-            )
+            # Tolerance tracks the marginal's own scale, as in test_steering.py.
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, f"KarrasSchedule reverse ODE @ t={t_:.3f}: W1 {w1:.4f} >= {tol:.4f}"
 
     @pytest.mark.slow
     @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule])
@@ -413,7 +407,7 @@ class TestReverseSampling:
         mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
         sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
         weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
-        schedule = _karras_schedule()
+        schedule = KarrasSchedule()
         gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
 
         n_samples, n_steps = 50_000, 400
@@ -429,19 +423,81 @@ class TestReverseSampling:
         assert trajectory.shape == (n_steps, n_samples, 1, 1)
         assert torch.allclose(trajectory[0], x, atol=1e-5)
 
-        x_grid, bin_edges = _histogram_setup()
         for t_idx in range(t.numel())[::10]:
             t_ = t[t_idx]
-            target = gmm.log_prob(x_grid, t=t_).exp().squeeze(-1)
-            hist, _ = torch.histogram(trajectory[t_idx, :, 0, 0], bins=bin_edges, density=True)
-            hist_dev = (hist - target).abs().max().item()
+            sigma_t = schedule.get_sigma_t(t_)
+            x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_t.item()))
             w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
-            assert hist_dev < 0.05, (
-                f"KarrasSchedule reverse SDE @ t={t_:.3f}: max histogram deviation {hist_dev:.3f}, W1 {w1:.3f}"
+            # Tolerance tracks the marginal's own scale, as in test_steering.py.
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, f"KarrasSchedule reverse SDE @ t={t_:.3f}: W1 {w1:.4f} >= {tol:.4f}"
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("schedule_cls", [LinearSchedule, KarrasSchedule])
+    def test_sde_then_ode_handover_marginals(self, schedule_cls):
+        """Reverse SDE down to t=0.5, then probability-flow ODE the rest of the way.
+
+        Both halves target the same marginal path, so switching integrator mid-flight
+        must not move the distribution: the handover state at t=0.5 is p_0.5 for the
+        SDE and the initial condition of the ODE, and both phases are checked against
+        the analytic marginals at every 5th step — not just at the seam.
+        """
+        torch.manual_seed(0)
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        schedule = schedule_cls()
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        gamma = 1.0
+        t_mid = 0.5
+        # LinearSchedule marginal std drops below the histogram bin width for t < 0.1.
+        t_end = 0.1 if schedule_cls is LinearSchedule else self.eps
+        n_samples, n_steps = 50_000, 200
+
+        if schedule_cls is LinearSchedule:
+
+            def sde_drift_fn(x_, t_):
+                return gmm.velocity(x_, t_) - 1 / 2 * gamma**2 * gmm.score(x_, t_)
+
+            def sde_diffusion_fn(t_):
+                return gamma
+
+        else:  # Karras / VE: f = 0, Anderson reverse SDE is dx = −g² score dt + g dW
+
+            def sde_drift_fn(x_, t_):
+                g = schedule.diffusion_coeff(t_)
+                return -(g**2) * gmm.score(x_, t_)
+
+            sde_diffusion_fn = schedule.diffusion_coeff
+
+        # Phase 1: reverse SDE from 1−eps down to exactly t_mid.
+        x = gmm.sample(shape=n_samples, t=1 - self.eps)  # [N, B=1, D=1]
+        t_1 = torch.linspace(1 - self.eps, t_mid, n_steps)
+        trajectory_1 = reverse_sampling(sde_drift_fn, sde_diffusion_fn, x, t_1)  # [T, N, B=1, D=1]
+
+        for t_idx in range(n_steps)[::5]:
+            t_ = t_1[t_idx]
+            sigma_t = schedule.get_sigma_t(t_)
+            x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_t.item()))
+            w1 = _wasserstein1(trajectory_1[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, (
+                f"{schedule.__class__.__name__} phase 1 (SDE) @ t={t_:.3f}: W1 {w1:.4f} >= {tol:.4f}"
             )
-            assert w1 < 0.08, (
-                f"KarrasSchedule reverse SDE @ t={t_:.3f}: W1 {w1:.3f}, "
-                f"max histogram deviation {hist_dev:.3f}"
+
+        # Phase 2: probability-flow ODE from exactly t_mid, handing over the final SDE state.
+        t_2 = torch.linspace(t_mid, t_end, n_steps)
+        trajectory_2 = reverse_sampling(gmm.velocity, None, trajectory_1[-1], t_2)  # [T, N, B=1, D=1]
+
+        for t_idx in range(n_steps)[::5]:
+            t_ = t_2[t_idx]
+            sigma_t = schedule.get_sigma_t(t_)
+            x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_t.item()))
+            w1 = _wasserstein1(trajectory_2[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, (
+                f"{schedule.__class__.__name__} phase 2 (ODE) @ t={t_:.3f}: W1 {w1:.4f} >= {tol:.4f}"
             )
 
     def test_t_must_be_decreasing(self):
@@ -449,6 +505,108 @@ class TestReverseSampling:
         t = torch.linspace(0.0, 1.0, 10)
         with pytest.raises(ValueError, match="strictly decreasing"):
             reverse_sampling(lambda x_, t_: x_, None, x, t)
+
+
+class TestTransitionKernel:
+    """`Schedule.transition` is the exact forward kernel — exact for any gap, not just small ones."""
+
+    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule, KarrasSchedule])
+    @pytest.mark.parametrize("s", [0.15, 0.5, 0.9], ids=lambda x: f"s={x}")
+    def test_one_jump_lands_on_the_marginal(self, schedule_cls, s):
+        """One draw from p_t, one transition to s, must land on p_s for any gap s − t.
+
+        A first-order Euler step of the forward SDE would drift off at the large gaps;
+        an additive-noise churn with no α_s/α_t rescaling fails on the VP schedules.
+        """
+        torch.manual_seed(0)
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        schedule = schedule_cls()
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        t = torch.tensor(0.1)
+        x = schedule.transition(gmm.sample(shape=10_000, t=t), t, torch.tensor(s))
+
+        sigma_s = schedule.get_sigma_t(torch.tensor(s))
+        x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_s.item()))
+        w1 = _wasserstein1(x[:, 0, 0], gmm, torch.tensor(s), x_grid, bin_edges)
+        tol = 0.08 * (1.0 + sigma_s.item())
+        assert w1 < tol, (
+            f"{schedule.__class__.__name__} transition 0.1->{s}: W1 {w1:.4f} >= {tol:.4f}"
+        )
+
+    def test_rejects_backwards_and_equal_times(self):
+        """The kernel only noises forward — s <= t would need a negative injected variance."""
+        schedule = BetaSchedule()
+        x = torch.randn(8, 1)
+        for t, s in [(0.5, 0.2), (0.5, 0.5)]:
+            with pytest.raises(ValueError, match="s must be > t"):
+                schedule.transition(x, torch.tensor(t), torch.tensor(s))
+
+
+class TestChurnSampling:
+    """EDM Alg. 2 splitting: exact forward kernel to t+|dt|, then PF-ODE transport to t+dt."""
+
+    eps = 1e-2
+
+    def test_t_must_be_decreasing(self):
+        """Reverse-only: on an increasing grid dt - |dt| is zero and the velocity vanishes."""
+        schedule = BetaSchedule()
+        x = torch.randn(8, 1, 1)
+        t = torch.linspace(0.01, 0.99, 5)
+        with pytest.raises(ValueError, match="strictly decreasing"):
+            reverse_churn_sampling(lambda x_, t_: x_, schedule.transition, x, t)
+
+    def test_churn_zero_is_the_probability_flow_ode(self):
+        """churn=0 leaves t̂ = t: no noise is drawn and the step is a plain Euler ODE."""
+        torch.manual_seed(0)
+        schedule = BetaSchedule()
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        x = torch.randn(64, 1, 1)
+        t = torch.linspace(1 - self.eps, self.eps, 20)
+        ode = reverse_sampling(gmm.velocity, None, x, t)
+        churned = reverse_churn_sampling(gmm.velocity, schedule.transition, x, t, churn=0.0)
+        assert torch.allclose(ode, churned, atol=1e-6)
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule, KarrasSchedule])
+    @pytest.mark.parametrize("churn", [0.5, 1.0], ids=lambda x: f"churn={x}")
+    def test_churn_marginals(self, schedule_cls, churn):
+        """Churn + probability-flow ODE stays on the analytical marginals throughout.
+
+        The drift is the plain PF-ODE velocity — the transition supplies all the
+        stochasticity, so a mis-scaled churn shows up directly as drifting marginals.
+        """
+        torch.manual_seed(0)
+        mu = torch.tensor([-2.0, 0.0, 2.0]).reshape(1, 3, 1)
+        sigma = torch.tensor([0.3, 0.3, 0.2]).reshape(1, 3, 1)
+        weight = torch.tensor([0.33, 0.5, 0.17]).reshape(1, 3)
+        schedule = schedule_cls()
+        gmm = GMM(mu=mu, sigma=sigma, weight=weight, schedule=schedule)
+
+        t_start = 1 - self.eps
+        # LinearSchedule's marginal std falls under the bin width below 0.1.
+        t_end = 0.1 if schedule_cls is LinearSchedule else self.eps
+        n_samples, n_steps = 10_000, 300
+        x = gmm.sample(shape=n_samples, t=t_start)
+        t = torch.linspace(t_start, t_end, n_steps)
+        trajectory = reverse_churn_sampling(gmm.velocity, schedule.transition, x, t, churn=churn)
+
+        for t_idx in range(n_steps)[::5]:
+            t_ = t[t_idx]
+            # Karras spans σ ∈ [4e-4, 160]; window and tolerance track the marginal.
+            sigma_t = schedule.get_sigma_t(t_)
+            x_grid, bin_edges = _histogram_setup(max(5.0, 6.0 * sigma_t.item()))
+            w1 = _wasserstein1(trajectory[t_idx, :, 0, 0], gmm, t_, x_grid, bin_edges)
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, (
+                f"{schedule.__class__.__name__} churn={churn} @ t={t_:.3f}: W1 {w1:.4f} >= {tol:.4f}"
+            )
 
 
 class TestValidation:
