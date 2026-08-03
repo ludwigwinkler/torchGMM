@@ -10,12 +10,12 @@ plumbing here is deliberately much smaller — no gradients, no β̇ — and the
 assertions are deliberately identical.
 """
 
+import os
 from pathlib import Path
 
 import pytest
 import torch
 from test_steering import (
-    PLOT,
     KarrasDenoiseMixin,
     _dbeta_dt,
     _plot_dir,
@@ -24,6 +24,8 @@ from test_steering import (
     _weighted_wasserstein1,
     plot_marginal_density_comparison,
 )
+
+PLOT = os.getenv("TORCHGMM_PLOT_TESTS", "0") == "1"
 
 from torchGMM.gmm import GMM
 from torchGMM.sampling import _ess_ratio, reverse_churn_sampling, steered_reverse_churn_sampling
