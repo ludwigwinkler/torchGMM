@@ -4,6 +4,12 @@ The thing worth testing here is the **stochastic process**, not the plumbing. A 
 assertion passes on a sampler that integrates the wrong drift. A Wasserstein check at
 intermediate times does not.
 
+The following test patterns are very important:
+- For each schedule write a test class that tests the **marginal family** `{p_t}` at intermediate times, not just the endpoints.
+- Implement the individual drifts, diffusion coefficients, and transition kernels as small, independently-testable functions that flow into the sampler.
+- Use ESS triggered resampling and ESS=num_steps+1 to test the same marginal family with and without resampling. The two must match. In particular, the resampling only at the end tests whether the weights are correctly accumulated over time and serves a gold standard test of sorts.
+- Test hyperparameters like reward center, ess_threshold, and churn across a few values should be implemented as orthogonal @pytest.mark.parametrize parameters, not as separate test classes. The marginal tests are the same for all of them.
+
 ## The core pattern
 
 Every sampler test is the same three lines of intent:
