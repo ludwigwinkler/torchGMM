@@ -1304,7 +1304,6 @@ def plot_marginal_density_comparison(
     min_x=None,
     max_x=None,
     weights=None,
-    n_hist_bins=80,
     energy=None,
     energy_time=None,
 ):
@@ -1312,7 +1311,7 @@ def plot_marginal_density_comparison(
     import matplotlib.pyplot as plt
 
     if min_x is not None and max_x is not None:
-        bin_edges = torch.linspace(min_x, max_x, n_hist_bins + 1, dtype=xs_flat.dtype, device=xs_flat.device)
+        bin_edges = torch.linspace(min_x, max_x, 161, dtype=xs_flat.dtype, device=xs_flat.device)
     else:
         bin_w = xs_flat[1] - xs_flat[0]
         bin_edges = torch.cat([xs_flat[:1] - bin_w / 2, xs_flat + bin_w / 2])

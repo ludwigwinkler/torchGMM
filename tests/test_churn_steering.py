@@ -335,6 +335,7 @@ class TestSteeredChurnGuidedFlow:
     N_PARTICLES = 10_000
     N_STEPS = 500
     REWARD_SIGMA = 1.0
+    GUIDANCE_BOOST = 20.0
 
     @pytest.fixture
     def setup(self):
@@ -347,7 +348,7 @@ class TestSteeredChurnGuidedFlow:
         )
         return gmm, sched
 
-    @pytest.mark.parametrize("churn", [0.1, 0.5, 1.0], ids=lambda v: f"churn={v}")
+    @pytest.mark.parametrize("churn", [0.25, 0.5, 1.0], ids=lambda v: f"churn={v}")
     @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
     @pytest.mark.parametrize('ess_threshold', [0.9, 700], ids=lambda v: f"ess={v}")
     def test_guided_steered_karras_churn_sampler_intermediate_marginals(
@@ -361,7 +362,8 @@ class TestSteeredChurnGuidedFlow:
 
         def beta_fn(t):
             g = sched.diffusion_coeff(t)
-            return (1 - t) ** 2 / (1 + g**2)
+            bar_sigma_t = sched.get_sigma_t(t)
+            return (1 - t) / (1 + 0.1* bar_sigma_t**2)
 
         def plot_energy(x, t):
             return energy(x)
@@ -389,6 +391,7 @@ class TestSteeredChurnGuidedFlow:
         torch.manual_seed(0)
         t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
         x0 = gmm.sample(shape=self.N_PARTICLES, t=self.T_NOISE)
+        torch.manual_seed(1)
         traj, _, weight_hist = steered_reverse_churn_sampling(
             drift=guided_drift,
             transition=sched.transition,
@@ -399,15 +402,38 @@ class TestSteeredChurnGuidedFlow:
             ess_threshold=ess_threshold,
         )
 
-        # FKC guide-the-descent scheme: churn supplies the effective diffusion but does
-        # not reweight. The bounded-variation FKC correction owns the complete cycle.
+        if churn == 1.0 and reward_center == -2.0 and ess_threshold == 700:
+            # Fixed-interval mode does not resample before the endpoint. With identical
+            # transition noise, guidance must therefore improve the proposal itself rather
+            # than relying on particle replication to make the cloud look tilted.
+            torch.manual_seed(1)
+            base_traj, _, _ = steered_reverse_churn_sampling(
+                drift=gmm.velocity,
+                transition=sched.transition,
+                weight_update=fkc_weight_update,
+                x=x0,
+                t=t,
+                churn=churn,
+                ess_threshold=ess_threshold,
+            )
+            for t_idx in [350, self.N_STEPS - 2]:
+                t_ = t[t_idx]
+                grid_radius = max(4.0, 6.0 * sched.get_sigma_t(t_).item())
+                xs = torch.linspace(-grid_radius, grid_radius, 600).reshape(-1, 1, 1)
+                p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: -energy(x))
+                guided_w1 = _wasserstein1(traj[t_idx, :, 0, 0], xs.squeeze(), p_tilt)
+                base_w1 = _wasserstein1(base_traj[t_idx, :, 0, 0], xs.squeeze(), p_tilt)
+                assert guided_w1 < 0.9 * base_w1, (
+                    f"guidance did not improve its proposal at t={t_:.3f}: "
+                    f"guided W1={guided_w1:.4f}, base W1={base_w1:.4f}"
+                )
 
         if PLOT:
             for t_idx in [*range(50, self.N_STEPS, 100), self.N_STEPS - 2, self.N_STEPS - 1]:
                 t_ = t[t_idx]
                 sigma_t = sched.get_sigma_t(t_)
                 grid_radius = max(4.0, 6.0 * sigma_t.item())
-                xs = torch.linspace(-grid_radius, grid_radius, 400).reshape(-1, 1, 1)
+                xs = torch.linspace(-grid_radius, grid_radius, 600).reshape(-1, 1, 1)
                 xs_flat = xs.squeeze()
                 p_data = gmm.log_prob(xs, t=t_).squeeze().exp()
                 p_data = p_data / torch.trapezoid(p_data, xs_flat)
@@ -448,7 +474,7 @@ class TestSteeredChurnGuidedFlow:
             t_ = t[t_idx]
             sigma_t = sched.get_sigma_t(t_)
             grid_radius = max(4.0, 6.0 * sigma_t.item())
-            xs = torch.linspace(-grid_radius, grid_radius, 400).reshape(-1, 1, 1)
+            xs = torch.linspace(-grid_radius, grid_radius, 600).reshape(-1, 1, 1)
             p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: -energy(x))
             w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
             # The bounded-variation FKC transport update is first-order accurate.
