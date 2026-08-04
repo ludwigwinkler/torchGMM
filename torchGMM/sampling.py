@@ -372,9 +372,9 @@ def steered_reverse_churn_sampling(
                 x = x + diffusion(t_curr) * torch.sqrt(reheat_dt) * torch.randn_like(x)
 
         # ---- deterministic half: probability-flow transport t̂ -> t+dt ----
-        # The weight is taken at the reheated pair (x̂, t̂) — where the transport starts
-        # and where the score is evaluated — mirroring the pre-step (x, t) of the
-        # Euler-Maruyama sampler.
+        # In an ideal world we denoise from t_hat to t_curr unguided, then 
+        # use the guidance-corrected drift to transport from t_curr to t_next. 
+        # But for simplicity and efficiency, we just rescale with the base step.
         log_w = log_w + weight_update(x, t_hat) * base_step.abs()
         x = x + drift(x, t_hat) * transport_dt
 
