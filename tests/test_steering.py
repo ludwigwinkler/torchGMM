@@ -100,9 +100,9 @@ class TestSteeredSamplingResampleModes:
     def _zero_drift(x, t):
         return torch.zeros_like(x)
 
-    def _weight_update(self, x, t, dt):
+    def _weight_update(self, x, t):
         bias = torch.linspace(-self.K, self.K, x.shape[0])
-        return bias * dt.abs()
+        return bias
 
     def _assert_weight_history(self, weight_hist):
         assert weight_hist.shape == (self.N_STEPS, self.N)
@@ -111,15 +111,15 @@ class TestSteeredSamplingResampleModes:
     def _predict_ess_history(self, t, trigger_fn):
         """Replay the same reset-on-trigger recursion the implementation runs.
 
-        Mirrors the real loop's `dt = t_next - t_curr` scaling exactly, since
-        `weight_update` multiplies the fixed bias by `dt.abs()` every step.
+        Mirrors the real loop's `dt = t_next - t_curr` scaling exactly: the solver
+        multiplies the fixed callback rate by `dt.abs()` every step.
         """
         bias = torch.linspace(-self.K, self.K, self.N)
         log_w = torch.zeros(self.N)
         history = []
         for t_curr, t_next in zip(t[:-1], t[1:]):
             dt = t_next - t_curr
-            log_w = log_w + bias * dt.abs()
+            log_w = log_w + bias
             ess = _ess_ratio(log_w)
             history.append(ess)
             if trigger_fn(len(history) - 1, ess):
@@ -251,7 +251,7 @@ class TestSteeredSamplingBetaFinalMarginal:
             beta = beta_fn(t)
             return f - sigma**2 * score - beta * (sigma**2 / 2) * grad_r(x)
 
-        def fkc_weight_update(x, t, dt):
+        def fkc_weight_update(x, t):
             f = sched.forward_drift(x, t)
             sigma = sched.diffusion_coeff(t)
             score = gmm.score(x, t)
@@ -260,7 +260,7 @@ class TestSteeredSamplingBetaFinalMarginal:
             term1 = -dbeta_dt(t) * rv
             term2 = -(beta * rg) * f
             term3 = (beta * rg) * (sigma**2 / 2) * score
-            return (term1 + term2 + term3).squeeze(-1).squeeze(-1) * dt.abs()
+            return (term1 + term2 + term3).squeeze(-1).squeeze(-1)
 
         # Seeded like every other slow test here: without this the run rides ambient RNG
         # state, so its W1 shifts with unrelated changes (e.g. the torch.randperm inside
@@ -446,13 +446,13 @@ class TestSteeredSamplingKarrasFinalMarginal(KarrasDenoiseMixin):
             _, grad_x, _, score = reward_and_grads(x, t)
             return -(g**2) * score - beta * (g**2 / 2) * grad_x
 
-        def fkc_weight_update(x, t, dt):
+        def fkc_weight_update(x, t):
             g = sched.diffusion_coeff(t)
             beta = beta_fn(t)
             dbeta = dbeta_dt(t)
             rv, grad_x, grad_t, score = reward_and_grads(x, t)
             integrand = -dbeta * rv - beta * grad_t + beta * grad_x * (g**2 / 2) * score
-            return integrand.squeeze(-1).squeeze(-1) * dt.abs()
+            return integrand.squeeze(-1).squeeze(-1)
 
         torch.manual_seed(0)
         t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
@@ -566,7 +566,7 @@ class TestSteeredSamplingBetaIntermediateMarginals:
             beta = beta_fn(t)
             return f - sigma**2 * score - beta * (sigma**2 / 2) * grad_r(x)
 
-        def fkc_weight_update(x, t, dt):
+        def fkc_weight_update(x, t):
             f = sched.forward_drift(x, t)
             sigma = sched.diffusion_coeff(t)
             score = gmm.score(x, t)
@@ -575,7 +575,7 @@ class TestSteeredSamplingBetaIntermediateMarginals:
             term1 = -dbeta_dt(t) * rv
             term2 = -(beta * rg) * f
             term3 = (beta * rg) * (sigma**2 / 2) * score
-            return (term1 + term2 + term3).squeeze(-1).squeeze(-1) * dt.abs()
+            return (term1 + term2 + term3).squeeze(-1).squeeze(-1)
 
         torch.manual_seed(0)
         t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
@@ -685,7 +685,7 @@ class TestSteeredSamplingKarrasIntermediateMarginals:
             score = gmm.score(x, t)
             return -(g**2) * score - beta * (g**2 / 2) * grad_r(x)
 
-        def fkc_weight_update(x, t, dt):
+        def fkc_weight_update(x, t):
             g = sched.diffusion_coeff(t)
             beta = beta_fn(t)
             dbeta = dbeta_dt(t)
@@ -693,7 +693,7 @@ class TestSteeredSamplingKarrasIntermediateMarginals:
             rg = grad_r(x)
             score = gmm.score(x, t)
             integrand = -dbeta * rv + beta * rg * (g**2 / 2) * score
-            return integrand.squeeze(-1).squeeze(-1) * dt.abs()
+            return integrand.squeeze(-1).squeeze(-1)
 
         torch.manual_seed(0)
         t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
@@ -828,13 +828,13 @@ class TestSteeredSamplingDenoisingKarrasIntermediateMarginals(KarrasDenoiseMixin
             _, grad_x, _, score = reward_and_grads(x, t)
             return -(g**2) * score - beta * (g**2 / 2) * grad_x
 
-        def fkc_weight_update(x, t, dt):
+        def fkc_weight_update(x, t):
             g = sched.diffusion_coeff(t)
             beta = beta_fn(t)
             dbeta = dbeta_dt(t)
             rv, grad_x, grad_t, score = reward_and_grads(x, t)
             integrand = -dbeta * rv - beta * grad_t + beta * grad_x * (g**2 / 2) * score
-            return integrand.squeeze(-1).squeeze(-1) * dt.abs()
+            return integrand.squeeze(-1).squeeze(-1)
 
         torch.manual_seed(0)
         t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
@@ -973,13 +973,13 @@ class TestSteeredSamplingIntermediateMarginals(KarrasDenoiseMixin):
             _, grad_x, _, score = reward_and_grads(x, t)
             return -(g**2) * score - beta * (g**2 / 2) * grad_x
 
-        def fkc_weight_update(x, t, dt):
+        def fkc_weight_update(x, t):
             g = sched.diffusion_coeff(t)
             beta = beta_fn(t)
             dbeta = dbeta_dt(t)
             rv, grad_x, grad_t, score = reward_and_grads(x, t)
             integrand = -dbeta * rv - beta * grad_t + beta * grad_x * (g**2 / 2) * score
-            return integrand.squeeze(-1).squeeze(-1) * dt.abs()
+            return integrand.squeeze(-1).squeeze(-1)
 
         torch.manual_seed(0)
         t = torch.linspace(self.T_NOISE, self.EPS, n_steps)
@@ -1086,7 +1086,7 @@ class TestSteeredSamplingIntermediateMarginals(KarrasDenoiseMixin):
             score = gmm.score(x, t)
             return -(g**2) * score - beta * (g**2 / 2) * grad_r(x)
 
-        def fkc_weight_update(x, t, dt):
+        def fkc_weight_update(x, t):
             g = sched.diffusion_coeff(t)
             beta = beta_fn(t)
             dbeta = dbeta_dt(t)
@@ -1094,7 +1094,7 @@ class TestSteeredSamplingIntermediateMarginals(KarrasDenoiseMixin):
             rg = grad_r(x)
             score = gmm.score(x, t)
             integrand = -dbeta * rv + beta * rg * (g**2 / 2) * score
-            return integrand.squeeze(-1).squeeze(-1) * dt.abs()
+            return integrand.squeeze(-1).squeeze(-1)
 
         torch.manual_seed(0)
         t = torch.linspace(self.T_NOISE, self.EPS, n_steps)

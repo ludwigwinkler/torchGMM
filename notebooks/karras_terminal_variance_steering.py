@@ -262,7 +262,7 @@ def run_steered(ctx, n_denoise_steps):
         _, grad_x, _, sc = _reward_and_grads(x_, t_)
         return -(g**2) * sc - beta * (g**2 / 2) * grad_x
 
-    def weight_update(x_, t_, dt):
+    def weight_update(x_, t_):
         g = schedule.diffusion_coeff(t_)
         beta = beta_fn(t_)
         dbeta = dbeta_dt(t_)
@@ -274,7 +274,7 @@ def run_steered(ctx, n_denoise_steps):
         # hat_x0(x_t, t); the convective piece is already carried by the guided
         # drift and the alignment inner product.
         integrand = -dbeta * rv - beta * grad_t + beta * grad_x * (g**2 / 2) * sc
-        return integrand.squeeze(-1).squeeze(-1) * dt.abs()
+        return integrand.squeeze(-1).squeeze(-1)
 
     # Fixed seed so the SDE noise is identical across n_denoise_steps — the
     # only knob that varies within a σ_max group.

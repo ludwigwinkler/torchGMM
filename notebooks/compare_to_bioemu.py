@@ -57,8 +57,8 @@ def reverse_drift(x_, t_):
     return -(g**2) * gmm.score(x_, t_)
 
 
-def weight_update(x_, t_, dt):
-    return r(x0_hat(x_, t_)).squeeze(-1).squeeze(-1) * dt.abs()
+def weight_update(x_, t_):
+    return r(x0_hat(x_, t_)).squeeze(-1).squeeze(-1)
 
 
 print(f"GMM: 3 modes at x = [-3, 0, 3], σ = 0.5")

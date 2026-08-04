@@ -116,13 +116,13 @@ def guided_drift(x_, t_):
     return f - g**2 * sc - beta * (g**2 / 2) * grad_r(x_)
 
 
-def weight_update(x_, t_, dt):
+def weight_update(x_, t_):
     f = schedule.forward_drift(x_, t_)
     g = schedule.diffusion_coeff(t_)
     sc = gmm.score(x_, t_)
     rg, rv = grad_r(x_), r(x_)
     beta = 1.0 - t_
-    return (rv - beta * rg * f + beta * rg * (g**2 / 2) * sc).squeeze(-1).squeeze(-1) * dt.abs()
+    return (rv - beta * rg * f + beta * rg * (g**2 / 2) * sc).squeeze(-1).squeeze(-1)
 
 
 traj_steer, ess_hist, _ = steered_reverse_sampling(

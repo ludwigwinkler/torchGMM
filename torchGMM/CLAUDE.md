@@ -62,12 +62,13 @@ single SDE, so it names them for what they are and owns its own loop. Take the c
 
 The velocity in both churn samplers is evaluated at the **reheated** time `t̂`, not at `t`: after
 the churn the state is distributed according to `p_t̂`, so the score at `t` is the wrong one for it
-(`docs/fkc_churn_steering.md` §3.1).
+(`docs/edm_fkc_steering.md` §1.2).
 
-## Steering: two samplers, two weight contracts
+## Steering: continuous FKC callback
 
-`steered_reverse_sampling` takes an *incremental* `weight_update(x, t, dt) -> [N]` because it
-discretises a continuous-time SDE, so the weight is the Prop. D.6 integrand times `dt`.
+`steered_reverse_sampling` takes an instantaneous log-weight-rate
+`weight_update(x, t) -> [N]`. It evaluates the callback at the pre-step pair `(x, t)`
+and multiplies its output by `|dt|`.
 
 `steered_reverse_churn_sampling` mirrors that signature one-for-one, with `transition` in
 place of `diffusion`: a churn step gets its stochasticity from re-noising with the exact
@@ -75,7 +76,6 @@ forward kernel rather than an additive Brownian increment, so that is the slot i
 
 ```python
 steered_reverse_churn_sampling(drift, transition, weight_update, x, t, churn=1.0, ...)
-steered_reverse_churn_sampling(drift, transition, None, x, t, beta=beta, energy=r, ...)
 steered_reverse_sampling(drift, diffusion, weight_update, x, t, ...)
 ```
 
@@ -85,33 +85,17 @@ Euler-Maruyama sampler; whatever compensation that guidance needs goes into `wei
 which you also own. Do not pass the reverse-SDE drift `f − g²s` — the churn already supplies
 the stochasticity and a score-corrected drift double-counts it.
 
-Two mutually exclusive weight contracts:
+`weight_update(x, t) -> [N]` is required and is evaluated at the *reheated* pair
+`(x̂, t̂)`. The solver multiplies its rate by the base reverse-grid magnitude
+`t_curr - t_next`, not the longer transport span. Because the continuous FKC weight is
+independent of churn strength (`docs/edm_fkc_steering.md` §3), the very same closure
+steers both samplers.
 
-- `weight_update(x, t, dt) -> [N]` — the continuous-time Prop. D.6 form, evaluated at the
-  *reheated* pair `(x̂, t̂)`. Because the FKC weight is independent of churn strength
-  (`docs/fkc_churn_steering.md` §7), the very same closure steers both samplers. Only the
-  *drift* carries κ, and in two places: the magic constant uses the effective diffusion,
-  `a = β·κ·g²/2`, and the field is divided by `(1+κ)` because the transport spans
-  `−(1+κ)|dt|`. Both collapse to the familiar form at κ=1, so an implementation that drops
-  the κ passes at `churn=1` and fails either side of it — `TestChurnSteeringWithEulerMaruyamaWeight`
-  sweeps churn precisely to catch that.
-- `beta(t)` plus `energy(x, t) -> [N]` — the discrete route native to the splitting. They
-  define the tilt as `ρ_t(x) = -β_t U_t(x)`. The churn kernel already maps
-  `q_t` onto `q_{t+dt}` exactly, so the whole correction is the endpoint
-  difference `ρ_{t+dt}(x_{t+dt}) − ρ_t(x_t)`: no `β̇_t`, no `∂_t r`, no reward Laplacian, no
-  score-alignment term, and no reward gradient at all, so a denoiser inside `energy` is
-  never backpropagated through. The sampler materializes this as the exact churn update
-  `ρ_{t̂}(x̂) − ρ_t(x)` and, when used alone, the alpha=0 deterministic update
-  `ρ_{t+dt}(x_{t+dt}) − ρ_{t̂}(x̂)`, which telescope to the endpoint difference. Exact at
-  finite step size rather than only in the limit.
-
-`ρ` is carried across steps and *gathered* on a resample rather than re-evaluated — `energy`
-may be expensive, and recomputing the ancestor's tilt would double its cost per step. A nonzero
-churn half evaluates a fresh reheated energy before the deterministic endpoint energy;
-the zero-churn path skips that redundant midpoint evaluation.
-
-Energy-derived tilt updates happen after their respective operators, but weighting and resampling decisions
-remain once per integration step after *both* halves. Do not resample at the reheated state.
+Only the *drift* carries κ, in two places: the effective guidance constant is
+`a = β·κ·g²/2`, and the field is divided by `(1+κ)` because the transport spans
+`−(1+κ)|dt|`. Both collapse to the familiar form at κ=1, so an implementation that drops
+the κ passes at `churn=1` and fails either side of it —
+`TestChurnSteeringWithEulerMaruyamaWeight` sweeps churn precisely to catch that.
 
 ## What NOT to do
 

@@ -109,18 +109,18 @@ def run(target_s: float, T_MAX=0.99, EPS_R=1e-3, N_R=5_000, T_R=2_000, ESS=0.9, 
         # FKC literal form, optionally amplified by W_GUIDE
         return -(g**2) * sc - W_GUIDE * beta * (g**2 / 2) * grad_x
 
-    def weight_update(x_, t_, dt):
+    def weight_update(x_, t_):
         g = ve_sched.diffusion_coeff(t_)
         beta = beta_fn(t_)
         nbeta = neg_dbeta_dt(t_)
         rv, grad_x, sc = reward_grads(x_, t_)
         if MODE == "bootstrap":
             # cumulative reward at Tweedie estimate
-            return rv.squeeze(-1).squeeze(-1) * dt.abs()
+            return rv.squeeze(-1).squeeze(-1)
         if MODE == "dps":
             # weight increment matching the DPS drift twist
-            return (rv + W_GUIDE * grad_x * sc).squeeze(-1).squeeze(-1) * dt.abs()
-        return (nbeta * rv + W_GUIDE * beta * grad_x * (g**2 / 2) * sc).squeeze(-1).squeeze(-1) * dt.abs()
+            return (rv + W_GUIDE * grad_x * sc).squeeze(-1).squeeze(-1)
+        return (nbeta * rv + W_GUIDE * beta * grad_x * (g**2 / 2) * sc).squeeze(-1).squeeze(-1)
 
     t_rev = torch.linspace(T_MAX, EPS_R, T_R)
     x_init = gmm_mix.sample(shape=N_R, t=T_MAX)

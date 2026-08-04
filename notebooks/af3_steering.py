@@ -181,14 +181,14 @@ def reverse_drift(x_, t_):
 guided_drift = reverse_drift
 
 
-# Stateless FKC potential: Δ log w = r(x̂_0(x_t, t)) · |dt|. Cumulative log_w
-# is then ∫₀^T r(x̂_0) dt — a valid Feynman-Kac potential targeting a tilted
+# Stateless FKC log-weight rate r(x̂_0(x_t, t)). The solver accumulates
+# Δ log w = r(x̂_0(x_t, t)) · |dt|, yielding a valid Feynman-Kac potential targeting a tilted
 # distribution that concentrates on the reward mode. Stateless is essential:
 # `steered_reverse_sampling` reshuffles `x = x[idx]` on resample but cannot
 # reshuffle external closure state, so any telescoping `log φ_curr − log φ_prev`
 # trick gets corrupted after the first resample.
-def weight_update(x_, t_, dt):
-    return r(x0_hat(x_, t_)).squeeze(-1).squeeze(-1) * dt.abs()
+def weight_update(x_, t_):
+    return r(x0_hat(x_, t_)).squeeze(-1).squeeze(-1)
 
 
 traj_unguided = reverse_sampling(reverse_drift, ve_sched.diffusion_coeff, x_init.clone(), t_rev).detach()

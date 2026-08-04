@@ -67,9 +67,9 @@ def reverse_drift(x_, t_):
     return -(g**2) * gmm.score(x_, t_)
 
 
-def weight_update(x_, t_, dt):
-    """Stateless FKC potential: Δlog_w = r(x̂₀(x_t, t)) · |dt|."""
-    return r(x0_hat(x_, t_)).squeeze(-1).squeeze(-1) * dt.abs()
+def weight_update(x_, t_):
+    """Stateless FKC log-weight rate; the solver multiplies it by |dt|."""
+    return r(x0_hat(x_, t_)).squeeze(-1).squeeze(-1)
 
 
 # ---------------------------------------------------------------------------
