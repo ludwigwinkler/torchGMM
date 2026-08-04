@@ -491,10 +491,10 @@ def guided_drift(x_, t_):                              # :261-263
     ...
     return -(g**2) * sc - beta * (g**2 / 2) * grad_x
 
-def weight_update(x_, t_, dt):                         # :266-277
+def weight_update(x_, t_):                             # :266-277
     ...
     integrand = -dbeta * rv - beta * grad_t + beta * grad_x * (g**2 / 2) * sc
-    return integrand.squeeze(-1).squeeze(-1) * dt.abs()
+    return integrand.squeeze(-1).squeeze(-1)
 ```
 
 This is the $\alpha = 1$ member, with $f_s = 0$ because the Karras/VE schedules have $\alpha_s \equiv 1$.
