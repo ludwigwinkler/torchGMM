@@ -292,7 +292,8 @@ class TestSteeredChurnGuidedFlow:
         def guided_drift(x, t_hat):
             # guidance needs the 1/(1+churn) to rescale from transport_dt back to base_step
             g2 = sched.diffusion_coeff(t_hat).square()
-            guidance_weight = beta_fn(t_hat) * churn * g2 / 2 / (1 + churn)
+            guidance_weight = beta_fn(t_hat) * churn * g2 / 2
+            guidance_weight /=  (1 + churn) # we integrate with (1+churn)* dt, but FKC get's integrated with just dt
             return gmm.velocity(x, t_hat) + guidance_weight * grad_energy(x)
 
         def fkc_weight_update(x, t):
