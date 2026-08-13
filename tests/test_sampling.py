@@ -571,7 +571,9 @@ class TestChurnSampling:
         t = torch.linspace(1 - self.eps, self.eps, 20)
         ode = reverse_sampling(gmm.velocity, None, x, t)
         churned = reverse_churn_sampling(gmm.velocity, schedule.transition, x, t, churn=0.0)
+        callable_churned = reverse_churn_sampling(gmm.velocity, schedule.transition, x, t, churn=lambda _: 0.0)
         assert torch.allclose(ode, churned, atol=1e-6)
+        assert torch.allclose(churned, callable_churned, atol=1e-6)
 
     @pytest.mark.slow
     @pytest.mark.parametrize("schedule_cls", [BetaSchedule, LinearSchedule, KarrasSchedule])

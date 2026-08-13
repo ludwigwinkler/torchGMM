@@ -28,7 +28,8 @@ torch.set_printoptions(sci_mode=False)
 class TestChurnSteeringProperties:
     """Resampling control flow, verified without a Monte-Carlo statistic.
 
-    With `churn=0` and zero velocity, particle values change only through resampling.
+    With zero velocity and an identity transition, particle values change only through
+    resampling. A zero churn value permanently disables that resampling.
     The FKC callback assigns each fixed particle a deterministic log-weight rate, so its
     solver-scaled ESS trace and reset behavior are predictable for every resampling draw.
     """
@@ -46,8 +47,12 @@ class TestChurnSteeringProperties:
         raise AssertionError("churn=0 must not call the transition kernel")
 
     @staticmethod
-    def _weight_update(x, t, dt):
-        return x.square().squeeze(-1) * dt.abs()
+    def _identity_transition(x, t, s):
+        return x
+
+    @staticmethod
+    def _weight_update(x, t):
+        return x.square().squeeze(-1)
 
     def test_shapes_and_normalisation(self):
         x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
@@ -81,9 +86,9 @@ class TestChurnSteeringProperties:
         def transition(x, t_curr, t_hat):
             return x + (t_hat - t_curr)
 
-        def fkc_weight_update(x, t_hat, dt):
-            spans.append((t_hat.item(), dt.item()))
-            return x.squeeze(-1) * dt
+        def fkc_weight_update(x, t_hat):
+            spans.append(t_hat.item())
+            return -x.squeeze(-1)
 
         _, _, weight_history = steered_reverse_churn_sampling(
             self._zero_velocity,
@@ -95,8 +100,7 @@ class TestChurnSteeringProperties:
             ess_threshold=1_000,
         )
 
-        assert [t_hat for t_hat, _ in spans] == pytest.approx([0.9, 0.7])
-        assert [dt for _, dt in spans] == pytest.approx([-0.2, -0.2])
+        assert spans == pytest.approx([0.9, 0.7])
         x_hat = x0 + 0.1
         expected_weights = torch.softmax(x_hat.squeeze(-1) * -0.2, dim=0)
         torch.testing.assert_close(weight_history[1], expected_weights)
@@ -115,7 +119,7 @@ class TestChurnSteeringProperties:
             drift=self._zero_velocity,
             transition=transition,
             diffusion=diffusion,
-            weight_update=lambda x, t, dt: torch.zeros(x.shape[0]),
+            weight_update=lambda x, t: torch.zeros(x.shape[0]),
             x=x0,
             t=t,
             churn=0.5,
@@ -150,11 +154,11 @@ class TestChurnSteeringProperties:
         t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
         _, _, weight_hist = steered_reverse_churn_sampling(
             self._zero_velocity,
-            self._no_transition,
+            self._identity_transition,
             self._weight_update,
             x0,
             t,
-            churn=0.0,
+            churn=1.0,
             ess_threshold=interval,
         )
         uniform = torch.full((self.N,), 1 / self.N)
@@ -168,31 +172,54 @@ class TestChurnSteeringProperties:
         t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
         _, _, weight_hist = steered_reverse_churn_sampling(
             self._zero_velocity,
-            self._no_transition,
+            self._identity_transition,
             self._weight_update,
             x0,
             t,
-            churn=0.0,
+            churn=1.0,
             ess_threshold=1,
         )
         uniform = torch.full((self.N,), 1 / self.N)
         assert torch.allclose(weight_hist, uniform.expand_as(weight_hist), atol=1e-6)
 
-    def test_final_resample_always_fires(self):
+    def test_final_resample_fires_while_churn_remains_positive(self):
         x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
         t = torch.linspace(1.0 - 1e-3, 1e-3, self.N_STEPS)
         _, _, weight_hist = steered_reverse_churn_sampling(
             self._zero_velocity,
-            self._no_transition,
+            self._identity_transition,
             self._weight_update,
             x0,
             t,
-            churn=0.0,
+            churn=1.0,
             ess_threshold=1_000,
         )
         uniform = torch.full((self.N,), 1 / self.N)
         assert not torch.allclose(weight_hist[-2], uniform, atol=1e-6)
         assert torch.allclose(weight_hist[-1], uniform, atol=1e-6)
+
+    def test_zero_churn_permanently_disables_resampling_and_accumulates_weights(self):
+        x0 = torch.linspace(-self.K, self.K, self.N).reshape(self.N, 1)
+        t = torch.tensor([0.9, 0.7, 0.5, 0.3])
+
+        def churn(t_curr):
+            return float(t_curr > 0.7)
+
+        trajectory, _, weight_hist = steered_reverse_churn_sampling(
+            self._zero_velocity,
+            self._identity_transition,
+            self._weight_update,
+            x0,
+            t,
+            churn=churn,
+            ess_threshold=1,
+        )
+
+        uniform = torch.full((self.N,), 1 / self.N)
+        energy = trajectory[1].squeeze(-1).square()
+        assert torch.allclose(weight_hist[1], uniform, atol=1e-6)
+        torch.testing.assert_close(weight_hist[2], torch.softmax(energy * 0.2, dim=0))
+        torch.testing.assert_close(weight_hist[-1], torch.softmax(energy * 0.4, dim=0))
 
     @pytest.mark.parametrize("bad_threshold", [0, -1, -0.5])
     def test_non_positive_threshold_rejected(self, bad_threshold):
@@ -253,8 +280,8 @@ class TestSteeredChurnGuidedFlow:
     EPS = 0.001
     T_NOISE = 1 - EPS
     N_PARTICLES = 10_000
-    N_STEPS = 500
-    REWARD_SIGMA = 1.0
+    N_STEPS = 1000
+    REWARD_SIGMA = 0.5
     GUIDANCE_BOOST = 20.0
 
     @pytest.fixture
@@ -269,7 +296,7 @@ class TestSteeredChurnGuidedFlow:
         return gmm, sched
 
     @pytest.mark.parametrize("churn", [0.25, 0.8, 1.0], ids=lambda v: f"churn={v}")
-    @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
+    @pytest.mark.parametrize("reward_center", [-3, -2.0, 1.0], ids=lambda v: f"center={v}")
     @pytest.mark.parametrize("ess_threshold", [0.9, 700], ids=lambda v: f"ess={v}")
     def test_guided_steered_karras_churn_sampler_intermediate_marginals(
         self, setup, reward_center, churn, ess_threshold
@@ -293,7 +320,7 @@ class TestSteeredChurnGuidedFlow:
             # guidance needs the 1/(1+churn) to rescale from transport_dt back to base_step
             g2 = sched.diffusion_coeff(t_hat).square()
             guidance_weight = beta_fn(t_hat) * churn * g2 / 2
-            guidance_weight /=  (1 + churn) # we integrate with (1+churn)* dt, but FKC get's integrated with just dt
+            guidance_weight /= 1 + churn  # we integrate with (1+churn)* dt, but FKC get's integrated with just dt
             return gmm.velocity(x, t_hat) + guidance_weight * grad_energy(x)
 
         def fkc_weight_update(x, t):
@@ -301,7 +328,7 @@ class TestSteeredChurnGuidedFlow:
             dbeta = _dbeta_dt(beta_fn, t)
             annealing = dbeta * energy(x)
             alignment = (-beta_fn(t) * grad_energy(x) * (g2 / 2) * gmm.score(x, t)).squeeze(-1).squeeze(-1)
-            return (annealing + alignment)
+            return annealing + alignment
 
         torch.manual_seed(0)
         t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
@@ -396,7 +423,6 @@ class TestSteeredChurnGuidedFlow:
             # The bounded-variation FKC transport update is first-order accurate.
             tol = 0.08 * (1.0 + sigma_t.item())
             assert w1 < tol, f"guided Karras churn={churn} center={reward_center} t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
-
 
 @pytest.mark.slow
 class TestChurnSteeringWithEulerMaruyamaWeight:

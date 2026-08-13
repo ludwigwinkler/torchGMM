@@ -95,7 +95,7 @@ def reverse_churn_sampling(
     transition: Callable,
     x: Float[Tensor, "*batch D"],
     t: Float[Tensor, " T"],
-    churn: float = 1.0,
+    churn: Callable | float = 1.0,
 ) -> Float[Tensor, "T *batch D"]:
     """Churn sampling (EDM Alg. 2): re-noise to t+h, then transport back past it to t+dt.
 
@@ -103,7 +103,7 @@ def reverse_churn_sampling(
     function rather than an integrator swapped into `reverse_sampling`. Each step composes
     two operators, each of which maps a distribution to a distribution on its own:
 
-      1. `transition(x, t, t+h)` — the exact forward kernel, h = churn·|dt|. Unlike an
+      1. `transition(x, t, t+h)` — the exact forward kernel, h = churn(t)·|dt|. Unlike an
          Euler step of the forward SDE it maps p_t onto p_{t+h} exactly, for any h. That
          exactness is the point: with a first-order churn the whole scheme collapses to
          reverse-SDE Euler-Maruyama up to O(h^{3/2}) and the splitting buys nothing.
@@ -130,12 +130,12 @@ def reverse_churn_sampling(
         transition: (x, t, s) -> [*batch, D]; the exact forward kernel, i.e. `schedule.transition`
         x:          Initial state [*batch, D]
         t:          1D strictly decreasing time grid in [0, 1], >= 2 points
-        churn:      Churn strength as a multiple of the step size, h = churn·|dt|. This is
-                    EDM's S_churn/N knob: 0 is the deterministic probability-flow ODE, 1
-                    re-noises a full step back before transporting two steps down, and >1
-                    over-churns (the transport then spans more than two steps). Values
-                    above 1 can push t+h past 1 for the first steps, where it is clamped
-                    and the transport span shrinks to match.
+        churn:      Non-negative scalar or `(t) -> non-negative float` churn strength as
+                    a multiple of the step size, h = churn(t)·|dt|. A value of 0 is the
+                    deterministic probability-flow ODE step; 1 re-noises a full step
+                    before transporting two steps down. Values above 1 can push t+h past
+                    1 for the first steps, where it is clamped and the transport span
+                    shrinks to match.
 
     Returns:
         Trajectory [T, *batch, D]
@@ -143,11 +143,12 @@ def reverse_churn_sampling(
     _validate_time_grid(t)
     if not torch.all(t[1:] < t[:-1]):
         raise ValueError("t must be strictly decreasing for reverse_churn_sampling")
-    if churn < 0:
-        raise ValueError(f"churn must be non-negative, got {churn}")
     trajectory = [x.clone()]
     for t_curr, dt in zip(t[:-1], t[1:] - t[:-1]):
-        t_hat = (t_curr + churn * dt.abs()).clamp(max=1.0)
+        churn_value = churn(t_curr) if callable(churn) else churn
+        if churn_value < 0:
+            raise ValueError(f"churn must be non-negative, got {churn_value}")
+        t_hat = (t_curr + churn_value * dt.abs()).clamp(max=1.0)
         # t̂ == t whenever churn == 0, or when the clamp bites at t == 1; both mean no churn.
         if t_hat > t_curr:
             x = transition(x, t_curr, t_hat)  # exact forward kernel, t -> t̂
@@ -268,7 +269,7 @@ def steered_reverse_churn_sampling(
     weight_update: Callable | None = None,
     x: Float[Tensor, "N *rest D"] | None = None,
     t: Float[Tensor, " T"] | None = None,
-    churn: float = 1.0,
+    churn: Callable | float = 1.0,
     ess_threshold: float | int = 0.5,
     diffusion: Callable | None = None,
 ) -> tuple[Float[Tensor, "T N *rest D"], list[float], Float[Tensor, "T N"]]:
@@ -314,13 +315,17 @@ def steered_reverse_churn_sampling(
                        longer deterministic transport duration.
         x:             [N, *rest, D] initial state; N = number of particles
         t:             1D strictly decreasing time grid in [0, 1], >= 2 points
-        churn:         Churn strength as a multiple of the step size, h = churn·|dt|; see
-                       `reverse_churn_sampling`. 0 makes every step a deterministic PF-ODE
-                       step and the churn contributes no stochasticity at all.
+        churn:         Non-negative scalar or `(t) -> non-negative float` churn strength
+                       as a multiple of the step size, h = churn(t)·|dt|; see
+                       `reverse_churn_sampling`. A value of 0 makes that step
+                       deterministic and permanently disables subsequent particle
+                       resampling, including the final resample; FKC weights still
+                       accumulate.
         ess_threshold: Resampling strategy, identical to `steered_reverse_sampling`:
                        adaptive when 0 < ess_threshold < 1 (resample once ESS/N drops
                        below it), fixed-interval when ess_threshold >= 1 (a whole number
-                       of steps). A final resample always fires after the last step.
+                       of steps). A final resample fires after the last step unless churn
+                       has reached zero.
         diffusion:     Optional VE forward diffusion coefficient `g(t)`. Used only when
                        `transition` is absent, via an additive Euler reheat; this is not
                        exact for finite steps.
@@ -339,8 +344,6 @@ def steered_reverse_churn_sampling(
         raise ValueError("weight_update must be provided for steered_reverse_churn_sampling")
     if transition is None and diffusion is None:
         raise ValueError("pass transition or diffusion for steered_reverse_churn_sampling")
-    if churn < 0:
-        raise ValueError(f"churn must be non-negative, got {churn}")
     if ess_threshold <= 0:
         raise ValueError(f"ess_threshold must be positive, got {ess_threshold}")
     if ess_threshold >= 1 and ess_threshold != int(ess_threshold):
@@ -355,13 +358,19 @@ def steered_reverse_churn_sampling(
     trajectory = [x.clone()]
     weight_history = [_normalized_weights(log_w)]
     ess_history: list[float] = []
+    resampling_enabled = True
 
     for step, (t_curr, t_next) in enumerate(zip(t[:-1], t[1:])):
         base_step = t_curr - t_next  # Positive: reverse grids satisfy t_next < t_curr.
-        t_hat = (t_curr + churn * base_step).clamp(max=1.0)  # Forward reheat: t_hat >= t_curr.
+        churn_value = churn(t_curr) if callable(churn) else churn
+        if churn_value < 0:
+            raise ValueError(f"churn must be non-negative, got {churn_value}")
+        if churn_value == 0:
+            resampling_enabled = False
+        t_hat = (t_curr + churn_value * base_step).clamp(max=1.0)  # Forward reheat: t_hat >= t_curr.
         transport_dt = t_next - t_hat  # Negative deterministic denoising increment.
         assert transport_dt <= 0, "transport_dt must be non-positive"
-        assert 0 <=t_next < t_curr <= t_hat <= 1, "t must be strictly decreasing"
+        assert 0 <= t_next < t_curr <= t_hat <= 1, "t must be strictly decreasing"
 
         # ---- churn half: exact forward kernel t -> t̂ ----
         if t_hat > t_curr:
@@ -372,8 +381,8 @@ def steered_reverse_churn_sampling(
                 x = x + diffusion(t_curr) * torch.sqrt(reheat_dt) * torch.randn_like(x)
 
         # ---- deterministic half: probability-flow transport t̂ -> t+dt ----
-        # In an ideal world we denoise from t_hat to t_curr unguided, then 
-        # use the guidance-corrected drift to transport from t_curr to t_next. 
+        # In an ideal world we denoise from t_hat to t_curr unguided, then
+        # use the guidance-corrected drift to transport from t_curr to t_next.
         # But for simplicity and efficiency, we just rescale with the base step.
         log_w = log_w + weight_update(x, t_hat) * base_step.abs()
         x = x + drift(x, t_hat) * transport_dt
@@ -386,7 +395,7 @@ def steered_reverse_churn_sampling(
         else:
             should_resample = ess < ess_threshold
 
-        if should_resample:
+        if resampling_enabled and should_resample:
             idx = _systematic_resample(log_w)
             x = x[idx]
             log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
@@ -394,12 +403,13 @@ def steered_reverse_churn_sampling(
         trajectory.append(x.clone())
         weight_history.append(_normalized_weights(log_w))
 
-    # Final resample according to accumulated weights
-    idx = _systematic_resample(log_w)
-    x = x[idx]
-    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
-    trajectory[-1] = x.clone()
-    weight_history[-1] = _normalized_weights(log_w)
+    if resampling_enabled:
+        # Final resample according to accumulated weights.
+        idx = _systematic_resample(log_w)
+        x = x[idx]
+        log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+        trajectory[-1] = x.clone()
+        weight_history[-1] = _normalized_weights(log_w)
 
     return torch.stack(trajectory), ess_history, torch.stack(weight_history)
 

@@ -30,14 +30,24 @@ $$\partial_t p_t = -\langle\nabla,\, p_t f_t\rangle + \tfrac{g_t^2}{2}\Delta p_t
 
 ## The family
 
-Reverse time $\tau = T - t$, so $d\tau = -dt$ and $\tau$ runs forward as the sample denoises.
+Reverse time $\tau = T - t$, so $d\tau = -dt$ and $\tau$ runs forward as the sample denoises. Write
+$q_\tau(x) := p_{T-\tau}(x)$ for the reversed marginals, and define the probability-flow drift
+
+$$\mu_\tau(x) := -f_\tau(x) + \frac{g_\tau^2}{2}\nabla\log q_\tau(x).$$
+
 For **every** $\alpha \ge 0$, the process
 
-$$\boxed{\;dX_\tau = \Big[-f_\tau(X_\tau) + \tfrac{1 + \alpha^2}{2}\,g_\tau^2\,\nabla_x \log p_\tau(X_\tau)\Big]d\tau \;+\; \alpha\, g_\tau\, dW_\tau\;}$$
+$$\boxed{\;
+dX_\tau
+= \left[\mu_\tau(X_\tau)
++\frac{\alpha^2g_\tau^2}{2}\nabla\log q_\tau(X_\tau)\right]d\tau
++\alpha g_\tau\,dW_\tau
+\;}$$
 
-reproduces the forward marginals exactly: $\mathrm{Law}(X_\tau) = p_{T-\tau}$ for all $\tau$, given
-$X_0 \sim p_T$. (All quantities are evaluated at the *forward* time $t = T-\tau$; the subscript
-$\tau$ is shorthand for that.)
+reproduces the forward marginals exactly: $\mathrm{Law}(X_\tau) = q_\tau = p_{T-\tau}$ for all
+$\tau$, given $X_0 \sim p_T$. Expanding $\mu_\tau$ recovers
+$-f_\tau+\tfrac{1+\alpha^2}{2}g_\tau^2\nabla\log q_\tau$. (All quantities are evaluated at the
+*forward* time $t = T-\tau$; the subscript $\tau$ is shorthand for that.)
 
 So there is not *one* reverse SDE but a one-parameter family of them, all with identical
 time-marginals and differing only in path measure. The score term and the noise term are locked
@@ -45,41 +55,81 @@ together: **you cannot change how much noise you inject without changing the sco
 
 ## Why $(1+\alpha^2)/2$ — the derivation
 
-Write $q_\tau(x) := p_{T-\tau}(x)$ for the reversed marginals. Reversing time in the forward
-Fokker–Planck equation flips both signs:
+Start from the original forward Fokker–Planck equation,
 
-$$\partial_\tau q_\tau = -\partial_t p_t\big|_{t=T-\tau} = \langle\nabla,\, q_\tau f_\tau\rangle - \tfrac{g_\tau^2}{2}\Delta q_\tau .$$
+$$\partial_t p_t
+=-\langle\nabla,\,p_t f_t\rangle+\frac{g_t^2}{2}\Delta p_t.$$
 
-Now *demand* that $q_\tau$ is the marginal law of some Itô process with unknown drift $b_\tau$ and
-diffusion coefficient $\alpha g_\tau$. That process's own Fokker–Planck equation is
+With $\tau=T-t$ and $q_\tau=p_{T-\tau}$, the required reverse-time marginals therefore satisfy
 
-$$\partial_\tau q_\tau = -\langle\nabla,\, q_\tau b_\tau\rangle + \tfrac{\alpha^2 g_\tau^2}{2}\Delta q_\tau .$$
+$$\partial_\tau q_\tau
+=\langle\nabla,\,q_\tau f_\tau\rangle-\frac{g_\tau^2}{2}\Delta q_\tau.$$
 
-Equate the two and move the Laplacians to one side:
+Use $\nabla q_\tau=q_\tau\nabla\log q_\tau$ to combine the reversed drift and diffusion into one
+probability-flow drift:
 
-$$-\langle\nabla,\, q_\tau b_\tau\rangle = \langle\nabla,\, q_\tau f_\tau\rangle - \tfrac{(1+\alpha^2) g_\tau^2}{2}\Delta q_\tau .$$
+$$\begin{aligned}
+\partial_\tau q_\tau
+&=-\left\langle\nabla,\,
+q_\tau\left(-f_\tau+\frac{g_\tau^2}{2}\nabla\log q_\tau\right)
+\right\rangle \\[2pt]
+&=-\langle\nabla,\,q_\tau\mu_\tau\rangle,
+\end{aligned}$$
 
-The only step that needs an identity is turning the Laplacian into a divergence of a *flux*, using
-$\nabla q = q\nabla\log q$:
+where
 
-$$\Delta q_\tau = \langle\nabla,\, \nabla q_\tau\rangle = \langle\nabla,\, q_\tau \nabla\log q_\tau\rangle .$$
+$$\mu_\tau=-f_\tau+\frac{g_\tau^2}{2}\nabla\log q_\tau.$$
 
-Substituting and pulling $\langle\nabla,\, q_\tau\,\cdot\,\rangle$ out of everything:
+At this point the equation has no diffusion term. Following the same construction as the blog
+post, add zero as a negative and positive copy of the desired diffusion:
 
-$$-\langle\nabla,\, q_\tau b_\tau\rangle = \Big\langle\nabla,\; q_\tau\Big[f_\tau - \tfrac{(1+\alpha^2)g_\tau^2}{2}\nabla\log q_\tau\Big]\Big\rangle ,$$
+$$\begin{aligned}
+\partial_\tau q_\tau
+={}&-\langle\nabla,\,q_\tau\mu_\tau\rangle \\[2pt]
+&-\frac{\alpha^2g_\tau^2}{2}\Delta q_\tau
++\frac{\alpha^2g_\tau^2}{2}\Delta q_\tau.
+\end{aligned}$$
 
-which is satisfied by
+The positive copy has exactly the Fokker–Planck form of diffusion amplitude $\alpha g_\tau$, since
+$(\alpha g_\tau)^2/2=\alpha^2g_\tau^2/2$. Absorb the negative copy into the drift using
+$\Delta q_\tau=\langle\nabla,\,q_\tau\nabla\log q_\tau\rangle$:
 
-$$b_\tau = -f_\tau + \tfrac{1+\alpha^2}{2}\,g_\tau^2\,\nabla\log q_\tau . \qquad\blacksquare$$
+$$\begin{aligned}
+\partial_\tau q_\tau
+={}&-\left\langle\nabla,\,
+q_\tau\left(\mu_\tau+\frac{\alpha^2g_\tau^2}{2}\nabla\log q_\tau\right)
+\right\rangle \\[2pt]
+&+\frac{\alpha^2g_\tau^2}{2}\Delta q_\tau.
+\end{aligned}$$
 
-The bookkeeping is the whole story. Time reversal flips the sign of the diffusion term to
-$-\tfrac{g^2}{2}\Delta q$ — an *anti*-diffusion, which is not a legal SDE on its own. To simulate it
-you must first pay back that $-\tfrac{g^2}{2}\Delta q$ with score transport, and then, if you *also*
-want to inject fresh noise of your own at level $\alpha g$, pay back an additional
-$-\tfrac{\alpha^2 g^2}{2}\Delta q$ on top. Hence $\tfrac{1}{2} + \tfrac{\alpha^2}{2}$: one half to
-undo the forward diffusion, one $\alpha^2/2$ to undo your own. **Extra diffusion smears the density
-outward, so the score term must be strengthened by exactly the same amount to push mass back into
-the high-probability region.**
+We can now read off the corresponding SDE directly:
+
+$$dX_\tau
+=\left[\mu_\tau(X_\tau)
++\frac{\alpha^2g_\tau^2}{2}\nabla\log q_\tau(X_\tau)\right]d\tau
++\alpha g_\tau\,dW_\tau.$$
+
+Finally, substituting the definition of $\mu_\tau$ gives
+
+$$\begin{aligned}
+\mu_\tau+\frac{\alpha^2g_\tau^2}{2}\nabla\log q_\tau
+&=-f_\tau+\frac{g_\tau^2}{2}\nabla\log q_\tau
++\frac{\alpha^2g_\tau^2}{2}\nabla\log q_\tau \\[2pt]
+&=-f_\tau+\frac{1+\alpha^2}{2}g_\tau^2\nabla\log q_\tau.
+\end{aligned}$$
+
+This is where $(1+\alpha^2)/2$ comes from: the first $1/2$ is already part of the deterministic
+reverse probability-flow drift $\mu_\tau$, while $\alpha^2/2$ is the score correction paired with
+the newly inserted diffusion $\alpha g_\tau$. Thus the complete reverse SDE is
+
+$$\boxed{\;
+dX_\tau
+=\left[
+-f_\tau(X_\tau)
++\frac{1+\alpha^2}{2}g_\tau^2\nabla\log q_\tau(X_\tau)
+\right]d\tau
++\alpha g_\tau\,dW_\tau.
+\;}$$
 
 ## Special cases
 
@@ -243,9 +293,41 @@ ride along into the weight with its mean subtracted, exactly like $\dot\beta_t r
 
 ## Step 2 — expand $\partial_t \log q_t$ and re-express in $p_t$ (Eqs. 267′–268′)
 
-Dividing (264′) by $q_t$ and using $\Delta q/q = \Delta\log q + \|\nabla\log q\|^2$:
+Apply the product rule
+$\langle\nabla,q_t v_t^{(\alpha)}\rangle
+=q_t\langle\nabla,v_t^{(\alpha)}\rangle
++\langle\nabla q_t,v_t^{(\alpha)}\rangle$, then substitute
 
-$$\frac{\partial \log q_t}{\partial t} = -\big\langle\nabla, v_t^{(\alpha)}\big\rangle - \big\langle\nabla\log q_t, v_t^{(\alpha)}\big\rangle + \frac{\tilde g_t^2}{2}\Delta\log q_t + \frac{\tilde g_t^2}{2}\big\|\nabla\log q_t\big\|^2. \tag{267'}$$
+$$\partial_t q_t=q_t\partial_t\log q_t,\qquad
+\nabla q_t=q_t\nabla\log q_t.$$
+
+Apply the spatial identity once more to the Laplacian:
+
+$$\begin{aligned}
+\Delta q_t
+&=\big\langle\nabla,\nabla q_t\big\rangle \\
+&=\big\langle\nabla,q_t\nabla\log q_t\big\rangle \\
+&=q_t\Delta\log q_t+\big\langle\nabla q_t,\nabla\log q_t\big\rangle \\
+&=q_t\left(\Delta\log q_t+\|\nabla\log q_t\|^2\right).
+\end{aligned}$$
+
+$$\begin{aligned}
+q_t\frac{\partial\log q_t}{\partial t}
+&=-q_t\big\langle\nabla,v_t^{(\alpha)}\big\rangle
+-q_t\big\langle\nabla\log q_t,v_t^{(\alpha)}\big\rangle \\[2pt]
+&\quad+\frac{\tilde g_t^2}{2}q_t
+\left(\Delta\log q_t+\|\nabla\log q_t\|^2\right).
+\end{aligned}$$
+
+Canceling the common factor $q_t$ gives
+
+$$\begin{aligned}
+\frac{\partial\log q_t}{\partial t}
+&= -\big\langle\nabla, v_t^{(\alpha)}\big\rangle
+- \big\langle\nabla\log q_t, v_t^{(\alpha)}\big\rangle
++ \frac{\tilde g_t^2}{2}\Delta\log q_t
++ \frac{\tilde g_t^2}{2}\big\|\nabla\log q_t\big\|^2.
+\end{aligned} \tag{267'}$$
 
 Now the substitution. **This is the step where nothing changes**: $Z_t$ is constant in $x$, and
 spatial derivatives are taken at fixed $t$, so the relations are the same as for a static reward,
@@ -335,11 +417,11 @@ continuity ↔ reweighting exchange; it simply sits in the weight.
 **General statement** (the analogue of the paper's Eqs. 259–261): for any $a$ and any base pair
 $(v_t, \tilde g_t)$ whose marginals are $q_t$, the tilted marginals $(265')$ are simulated by
 
-$$dx_t = \big(v_t(x_t) + a\nabla r(x_t,t)\big)\,dt + \tilde g_t\,dW_t,$$
+$$dx_t = \big(v^{(\alpha)}_t(x_t) + a\nabla r(x_t,t)\big)\,dt + \tilde g_t\,dW_t,$$
 
 $$\begin{aligned}
 dw_t = \Bigg[\;
-&\Big\langle\nabla r,\;\; \beta_t\Big(v_t - \tilde g_t^2\,\nabla\log q_t - \frac{\tilde g_t^2}{2}\beta_t\nabla r\Big) + a\big(\nabla\log q_t + \beta_t\nabla r\big)\Big\rangle \\[4pt]
+&\Big\langle\nabla r,\;\; \beta_t\Big(v^{(\alpha)}_t - \tilde g_t^2\,\nabla\log q_t - \frac{\tilde g_t^2}{2}\beta_t\nabla r\Big) + a\big(\nabla\log q_t + \beta_t\nabla r\big)\Big\rangle \\[4pt]
 &+ \Big(a - \beta_t\frac{\tilde g_t^2}{2}\Big)\Delta r
 \;+\; \frac{\partial\beta_t}{\partial t}\, r
 \;+\; \beta_t\frac{\partial r}{\partial t}
@@ -363,24 +445,60 @@ $$\begin{aligned}
 \;+\; \beta_t\frac{\partial r}{\partial t}.
 \end{aligned} \tag{273'}$$
 
-Expand $\nabla\log p_t = \nabla\log q_t + \beta_t\nabla r$ and collect. Two cancellations:
+First substitute both
 
-- **The $\beta_t^2\|\nabla r\|^2$ terms cancel**, as in the paper:
-  $+\beta_t\tfrac{\alpha^2 g_t^2}{2}\beta_t\|\nabla r\|^2$ from the drift term against
-  $-\tfrac{\alpha^2 g_t^2}{2}\beta_t^2\|\nabla r\|^2$ from the inner product.
-- **The α's cancel in the score terms.** This is what is new relative to the paper, where
-  $v_t - \sigma_t^2\nabla\log q_t = -f_t$ collapses immediately. Here it does not — instead
-  $v_t^{(\alpha)} - \alpha^2 g_t^2\nabla\log q_t = -f_t + \tfrac{1-\alpha^2}{2}g_t^2\nabla\log q_t$,
-  and that residual score piece combines with the $\tfrac{\alpha^2 g_t^2}{2}\langle\nabla r,\nabla\log q_t\rangle$
-  coming from the guidance drift:
+$$\nabla\log p_t=\nabla\log q_t+\beta_t\nabla r$$
 
-$$\underbrace{\frac{\alpha^2}{2}}_{\text{from } a\nabla\log q_t} \;+\; \underbrace{\frac{1-\alpha^2}{2}}_{\text{from } v_t^{(\alpha)} - \tilde g_t^2\nabla\log q_t} \;=\; \frac{1}{2}\,,$$
+and
 
-or equivalently, in one line,
+$$\begin{aligned}
+v_t^{(\alpha)}
+-\alpha^2g_t^2\nabla\log q_t
+-\frac{\alpha^2g_t^2}{2}\beta_t\nabla r
+&=-f_t+\frac{1+\alpha^2}{2}g_t^2\nabla\log q_t
+-\alpha^2g_t^2\nabla\log q_t
+-\frac{\alpha^2g_t^2}{2}\beta_t\nabla r \\[2pt]
+&=-f_t+\frac{1-\alpha^2}{2}g_t^2\nabla\log q_t
+-\frac{\alpha^2g_t^2}{2}\beta_t\nabla r.
+\end{aligned}$$
 
-$$v_t^{(\alpha)} - \frac{\alpha^2 g_t^2}{2}\nabla\log q_t \;=\; -f_t + \frac{g_t^2}{2}\nabla\log q_t .$$
+Equation (273′) then becomes
 
-Hence
+$$\begin{aligned}
+\mathrm{w}_t(x)
+&=\beta_t\frac{\alpha^2g_t^2}{2}
+\left\langle\nabla r,\nabla\log q_t+\beta_t\nabla r\right\rangle \\[2pt]
+&\quad+\left\langle\beta_t\nabla r,\,
+-f_t+\frac{1-\alpha^2}{2}g_t^2\nabla\log q_t
+-\frac{\alpha^2g_t^2}{2}\beta_t\nabla r\right\rangle \\[2pt]
+&\quad+\frac{\partial\beta_t}{\partial t}r
++\beta_t\frac{\partial r}{\partial t} \\[4pt]
+&=\beta_t\frac{\alpha^2g_t^2}{2}
+\left\langle\nabla r,\nabla\log q_t\right\rangle
++\beta_t^2\frac{\alpha^2g_t^2}{2}\|\nabla r\|^2 \\[2pt]
+&\quad-\left\langle\beta_t\nabla r,f_t\right\rangle
++\beta_t\frac{1-\alpha^2}{2}g_t^2
+\left\langle\nabla r,\nabla\log q_t\right\rangle
+-\beta_t^2\frac{\alpha^2g_t^2}{2}\|\nabla r\|^2 \\[2pt]
+&\quad+\frac{\partial\beta_t}{\partial t}r
++\beta_t\frac{\partial r}{\partial t}.
+\end{aligned}$$
+
+The two $\beta_t^2\alpha^2g_t^2\|\nabla r\|^2/2$ terms cancel. The two score terms combine as
+
+$$\begin{aligned}
+&\beta_t\frac{\alpha^2g_t^2}{2}
+\left\langle\nabla r,\nabla\log q_t\right\rangle
++\beta_t\frac{1-\alpha^2}{2}g_t^2
+\left\langle\nabla r,\nabla\log q_t\right\rangle \\[2pt]
+&\qquad=\beta_t g_t^2
+\left(\frac{\alpha^2}{2}+\frac{1-\alpha^2}{2}\right)
+\left\langle\nabla r,\nabla\log q_t\right\rangle \\[2pt]
+&\qquad=\beta_t\frac{g_t^2}{2}
+\left\langle\nabla r,\nabla\log q_t\right\rangle.
+\end{aligned}$$
+
+Therefore
 
 $$\begin{aligned}
 \mathrm{w}_t(x)
