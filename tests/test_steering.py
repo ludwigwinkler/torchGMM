@@ -10,7 +10,7 @@ from torchGMM.schedule import BetaSchedule, KarrasSchedule
 
 torch.set_printoptions(sci_mode=False)
 
-PLOT = False  # flip to True locally to save FKC steering diagnostic plots next to this file
+PLOT = True  # flip to True locally to save FKC steering diagnostic plots next to this file
 PLOT_DIR = Path(__file__).parent / "plots"
 
 
@@ -772,6 +772,148 @@ class TestSteeredSamplingKarrasIntermediateMarginals:
                     )
                     / f"karras_trajectories_center{reward_center}_resample{ess_threshold}.png"
                 ),
+            )
+
+
+@pytest.mark.slow
+class TestSteeredSamplingVariableAlphaIntermediateMarginals:
+    """Equation (275′)–(276′) steering for constant and time-dependent alpha."""
+
+    EPS = 0.001
+    T_NOISE = 1 - EPS
+    N_PARTICLES = 10_000
+    N_STEPS = 1000
+    REWARD_SIGMA = 0.5
+
+    @pytest.fixture
+    def setup(self):
+        sched = KarrasSchedule()
+        gmm = GMM(
+            mu=torch.tensor([[[-1.0], [1.0]]]),
+            sigma=torch.tensor([[[0.4], [0.4]]]),
+            weight=torch.tensor([[0.3, 0.7]]),
+            schedule=sched,
+        )
+        return gmm, sched
+
+    @pytest.mark.parametrize("alpha", [0.5, "schedule"], ids=lambda v: f"alpha={v}")
+    @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
+    @pytest.mark.parametrize("ess_threshold", [0.9, 700], ids=lambda v: f"ess={v}")
+    def test_variable_alpha_intermediate_marginals(self, setup, reward_center, alpha, ess_threshold):
+        gmm, sched = setup
+        if alpha == "schedule":
+            alpha_label = "3sin"
+
+            def alpha_fn(t):
+                return 3 * torch.sin(torch.pi * t) + 0.2
+
+        else:
+            alpha_label = str(alpha)
+
+            def alpha_fn(t):
+                return torch.as_tensor(alpha, dtype=t.dtype, device=t.device)
+
+        def energy(x):
+            return (0.5 * (x - reward_center) ** 2 / self.REWARD_SIGMA**2).squeeze(-1).squeeze(-1)
+
+        def reward(x):
+            return -energy(x)
+
+        def grad_reward(x):
+            return -(x - reward_center) / self.REWARD_SIGMA**2
+
+        def beta_fn(t):
+            bar_sigma_t = sched.get_sigma_t(t)
+            return (1 - t) ** 6 / (1 + 0.1 * bar_sigma_t**2)
+
+        def guided_drift(x, t):
+            alpha_sq = alpha_fn(t).square()
+            g2 = sched.diffusion_coeff(t).square()
+            forward_drift = sched.forward_drift(x, t)
+            score = gmm.score(x, t)
+            return (
+                forward_drift
+                - (1 + alpha_sq) * g2 * score / 2
+                - beta_fn(t) * alpha_sq * g2 * grad_reward(x) / 2
+            )
+
+        def diffusion(t):
+            return alpha_fn(t) * sched.diffusion_coeff(t)
+
+        def fkc_weight_update(x, t):
+            g2 = sched.diffusion_coeff(t).square()
+            forward_drift = sched.forward_drift(x, t)
+            score = gmm.score(x, t)
+            annealing = -_dbeta_dt(beta_fn, t) * reward(x)
+            alignment = (
+                beta_fn(t) * grad_reward(x) * ((g2 / 2) * score - forward_drift)
+            ).squeeze(-1).squeeze(-1)
+            return annealing + alignment
+
+        torch.manual_seed(0)
+        t = torch.linspace(self.T_NOISE, self.EPS, self.N_STEPS)
+        x0 = gmm.sample(shape=self.N_PARTICLES, t=self.T_NOISE)
+        torch.manual_seed(1)
+        traj, _, weight_hist = steered_reverse_sampling(
+            drift=guided_drift,
+            diffusion=diffusion,
+            weight_update=fkc_weight_update,
+            x=x0,
+            t=t,
+            ess_threshold=ess_threshold,
+        )
+
+        if PLOT:
+            for t_idx in [*range(50, self.N_STEPS, 100), self.N_STEPS - 2, self.N_STEPS - 1]:
+                t_ = t[t_idx]
+                sigma_t = sched.get_sigma_t(t_)
+                grid_radius = max(4.0, 6.0 * sigma_t.item())
+                xs = torch.linspace(-grid_radius, grid_radius, 600).reshape(-1, 1, 1)
+                xs_flat = xs.squeeze()
+                p_data = gmm.log_prob(xs, t=t_).squeeze().exp()
+                p_data = p_data / torch.trapezoid(p_data, xs_flat)
+                p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: reward(x))
+                samples = traj[t_idx, :, 0, 0]
+                weights = weight_hist[t_idx]
+                w1 = _weighted_wasserstein1(samples, weights, xs_flat, p_tilt)
+                plot_marginal_density_comparison(
+                    xs_flat=xs_flat,
+                    p_data=p_data,
+                    p_rew=p_tilt,
+                    samples=samples,
+                    weights=weights,
+                    reward_center=reward_center,
+                    title=(
+                        f"Euler-Maruyama alpha-family FKC | KarrasSchedule\n"
+                        f"alpha={alpha_label}, ess={ess_threshold}, center={reward_center}, "
+                        f"t={t_:.3f} | weighted W1={w1:.4f}"
+                    ),
+                    out_path=(
+                        _plot_dir(
+                            "test_steering",
+                            "TestSteeredSamplingVariableAlphaIntermediateMarginals",
+                            "test_variable_alpha_intermediate_marginals",
+                            f"alpha{alpha_label}",
+                            f"ess{ess_threshold}",
+                            f"reward{reward_center}",
+                        )
+                        / f"t{t_idx}.png"
+                    ),
+                    min_x=-grid_radius,
+                    max_x=grid_radius,
+                )
+
+        for t_idx in range(50, self.N_STEPS, 10):
+            t_ = t[t_idx]
+            sigma_t = sched.get_sigma_t(t_)
+            grid_radius = max(4.0, 6.0 * sigma_t.item())
+            xs = torch.linspace(-grid_radius, grid_radius, 600).reshape(-1, 1, 1)
+            p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: reward(x))
+            w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
+            tol = 0.08 * (1.0 + sigma_t.item())
+            assert w1 < tol, (
+                f"alpha-family Karras alpha={alpha_label} center={reward_center} "
+                f"t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
             )
 
 
