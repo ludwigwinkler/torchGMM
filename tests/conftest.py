@@ -5,18 +5,17 @@ use the available compute without oversubscribing it.
 """
 
 import os
-
+import torch  # noqa: E402
 import matplotlib
+
 
 matplotlib.use("Agg")  # non-interactive backend; suppresses plot windows in tests
 
-os.environ["OMP_NUM_THREADS"] = "2"
-os.environ["MKL_NUM_THREADS"] = "2"
-os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
-import torch  # noqa: E402
-
-torch.set_num_threads(2)
+torch.set_num_threads(1)
 
 
 def pytest_xdist_auto_num_workers(config):
