@@ -9,7 +9,8 @@ Package-level guidance for working inside this directory.
 | `__init__.py` | Public re-exports only — no logic |
 | `gmm.py` | `GMM` and `Conditional` classes |
 | `schedule.py` | `Schedule`, `BetaSchedule`, `LinearSchedule`, `VESchedule`, `KarrasSchedule` |
-| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `reverse_churn_sampling`, `steered_reverse_sampling`, `steered_reverse_churn_sampling` |
+| `sampling.py` | `euler_maruyama`, `forward_sampling`, `reverse_sampling`, `reverse_churn_sampling` |
+| `steering.py` | SMC helpers and `steered_reverse_sampling`, `steered_reverse_churn_sampling`, `steered_reverse_edm_sampling` |
 
 ## Shape convention
 
@@ -65,6 +66,9 @@ the churn the state is distributed according to `p_t̂`, so the score at `t` is 
 (`docs/edm_fkc_steering.md` §1.2).
 
 ## Steering: continuous FKC callback
+
+All steered samplers and SMC helpers belong in `steering.py`; unsteered
+integrators and operator-splitting samplers belong in `sampling.py`.
 
 `steered_reverse_sampling` takes an instantaneous log-weight-rate
 `weight_update(x, t) -> [N]`. It evaluates the callback at the pre-step pair `(x, t)`

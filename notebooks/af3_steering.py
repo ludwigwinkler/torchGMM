@@ -13,7 +13,8 @@ import torch
 from _utils import plt_show
 
 from torchGMM import GMM, KarrasSchedule, VESchedule, forward_sampling
-from torchGMM.sampling import reverse_sampling, steered_reverse_sampling
+from torchGMM.sampling import reverse_sampling
+from torchGMM.steering import steered_reverse_sampling
 
 plt.style.use("default")
 plt.rcdefaults()
