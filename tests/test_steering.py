@@ -5,8 +5,8 @@ import pytest
 import torch
 
 from torchGMM.gmm import GMM
-from torchGMM.sampling import _ess_ratio, steered_reverse_sampling
 from torchGMM.schedule import BetaSchedule, KarrasSchedule
+from torchGMM.steering import _ess_ratio, steered_reverse_sampling
 
 torch.set_printoptions(sci_mode=False)
 
@@ -119,7 +119,7 @@ class TestSteeredSamplingResampleModes:
         history = []
         for t_curr, t_next in zip(t[:-1], t[1:]):
             dt = t_next - t_curr
-            log_w = log_w + bias
+            log_w = log_w + bias * dt.abs()
             ess = _ess_ratio(log_w)
             history.append(ess)
             if trigger_fn(len(history) - 1, ess):
@@ -831,11 +831,7 @@ class TestSteeredSamplingVariableAlphaIntermediateMarginals:
             g2 = sched.diffusion_coeff(t).square()
             forward_drift = sched.forward_drift(x, t)
             score = gmm.score(x, t)
-            return (
-                forward_drift
-                - (1 + alpha_sq) * g2 * score / 2
-                - beta_fn(t) * alpha_sq * g2 * grad_reward(x) / 2
-            )
+            return forward_drift - (1 + alpha_sq) * g2 * score / 2 - beta_fn(t) * alpha_sq * g2 * grad_reward(x) / 2
 
         def diffusion(t):
             return alpha_fn(t) * sched.diffusion_coeff(t)
@@ -845,9 +841,7 @@ class TestSteeredSamplingVariableAlphaIntermediateMarginals:
             forward_drift = sched.forward_drift(x, t)
             score = gmm.score(x, t)
             annealing = -_dbeta_dt(beta_fn, t) * reward(x)
-            alignment = (
-                beta_fn(t) * grad_reward(x) * ((g2 / 2) * score - forward_drift)
-            ).squeeze(-1).squeeze(-1)
+            alignment = (beta_fn(t) * grad_reward(x) * ((g2 / 2) * score - forward_drift)).squeeze(-1).squeeze(-1)
             return annealing + alignment
 
         torch.manual_seed(0)
@@ -912,8 +906,7 @@ class TestSteeredSamplingVariableAlphaIntermediateMarginals:
             w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
             tol = 0.08 * (1.0 + sigma_t.item())
             assert w1 < tol, (
-                f"alpha-family Karras alpha={alpha_label} center={reward_center} "
-                f"t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
+                f"alpha-family Karras alpha={alpha_label} center={reward_center} t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
             )
 
 
@@ -1298,7 +1291,7 @@ class TestSteeredSamplingIntermediateMarginals(KarrasDenoiseMixin):
 
 
 def _resample_mode_label(ess_threshold, n_steps):
-    """Human-readable label for the ess_threshold resampling mode (mirrors sampling.py semantics)."""
+    """Human-readable label for the ess_threshold resampling mode (mirrors steering.py semantics)."""
     if ess_threshold < 1:
         return f"adaptive (ESS threshold={ess_threshold})"
     if ess_threshold >= n_steps - 1:

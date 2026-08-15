@@ -16,13 +16,13 @@ from test_steering import (
     plot_marginal_density_comparison,
 )
 
-PLOT = True
-
 from torchGMM.gmm import GMM
-from torchGMM.sampling import _ess_ratio, steered_reverse_churn_sampling
 from torchGMM.schedule import BetaSchedule, KarrasSchedule
+from torchGMM.steering import _ess_ratio, steered_reverse_churn_sampling
 
 torch.set_printoptions(sci_mode=False)
+
+PLOT = True
 
 
 class TestChurnSteeringProperties:
@@ -423,6 +423,7 @@ class TestSteeredChurnGuidedFlow:
             # The bounded-variation FKC transport update is first-order accurate.
             tol = 0.08 * (1.0 + sigma_t.item())
             assert w1 < tol, f"guided Karras churn={churn} center={reward_center} t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
+
 
 @pytest.mark.slow
 class TestChurnSteeringWithEulerMaruyamaWeight:

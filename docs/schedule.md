@@ -579,7 +579,7 @@ so EDM's clamp $\gamma_i\le\sqrt2-1$ is exactly the requirement $\hat\sigma_i^2\
 
 ### First-order (Euler-Maruyama) approximation — the road not taken
 
-The churn samplers in `sampling.py` use the closed-form kernel above: they take
+The churn samplers in `sampling.py` and `steering.py` use the closed-form kernel above: they take
 `Schedule.transition` as a callable and jump $t\rightarrow\hat t$ in one exact draw. This
 subsection derives what the *alternative* would cost, because that difference is the
 entire reason the exact kernel is worth threading through the API — and it is where the

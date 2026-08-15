@@ -23,7 +23,7 @@ from PIL import Image
 from scipy.stats import norm
 
 from torchGMM import GMM, BetaSchedule, forward_sampling, reverse_sampling
-from torchGMM.sampling import steered_reverse_sampling
+from torchGMM.steering import steered_reverse_sampling
 
 plt.style.use("default")
 plt.rcParams.update(

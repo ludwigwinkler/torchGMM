@@ -26,7 +26,8 @@ from _utils import plt_show
 OUT_DIR = Path(__file__).resolve().parent
 
 from torchGMM import GMM, KarrasSchedule
-from torchGMM.sampling import reverse_sampling, steered_reverse_sampling
+from torchGMM.sampling import reverse_sampling
+from torchGMM.steering import steered_reverse_sampling
 
 plt.style.use("default")
 plt.rcdefaults()
