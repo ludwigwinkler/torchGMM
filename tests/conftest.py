@@ -20,8 +20,8 @@ torch.set_num_threads(2)
 
 
 def pytest_xdist_auto_num_workers(config):
-    """Use half of the available CPU cores for `pytest -n auto`."""
-    return max(1, (os.cpu_count() or 1) // 2)
+    """Use all but four available CPU cores for `pytest -n auto`."""
+    return max(1, (os.cpu_count() or 1) - 4)
 
 
 def get_local_device() -> torch.device:
