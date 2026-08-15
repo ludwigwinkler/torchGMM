@@ -287,6 +287,30 @@ class KarrasSchedule(Schedule):
         return self.sigma_data * u**self.rho
 
     @jaxtyped(typechecker=beartype)
+    def time(self, sigma: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        """Invert the Karras noise schedule.
+
+        Args:
+            sigma: Noise level in
+                `[sigma_data * sigma_min, sigma_data * sigma_max]`.
+
+        Returns:
+            Repository schedule time `t` with `get_sigma_t(t) == sigma`.
+        """
+        if not torch.all(torch.isfinite(sigma)):
+            raise ValueError("sigma must be finite")
+
+        sigma_min = torch.as_tensor(self.sigma_data * self.sigma_min, dtype=sigma.dtype, device=sigma.device)
+        sigma_max = torch.as_tensor(self.sigma_data * self.sigma_max, dtype=sigma.dtype, device=sigma.device)
+        tolerance = 8 * torch.finfo(sigma.dtype).eps * torch.maximum(sigma_max.abs(), torch.ones_like(sigma_max))
+        if not torch.all((sigma >= sigma_min - tolerance) & (sigma <= sigma_max + tolerance)):
+            raise ValueError(f"sigma must be within [{sigma_min.item()}, {sigma_max.item()}]")
+
+        sigma = sigma.clamp(min=sigma_min, max=sigma_max)
+        u = (sigma / self.sigma_data) ** (1.0 / self.rho)
+        return ((u - self._u_min) / (self._u_max - self._u_min)).clamp(0.0, 1.0)
+
+    @jaxtyped(typechecker=beartype)
     def get_dalpha_dt(self, t: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
         """dα_t/dt = 0"""
         return torch.zeros_like(t)

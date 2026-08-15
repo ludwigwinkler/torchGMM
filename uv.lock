@@ -2210,6 +2210,7 @@ wheels = [
 
 [[package]]
 name = "torchgmm"
+version = "0.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "beartype" },

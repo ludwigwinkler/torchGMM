@@ -24,6 +24,18 @@ def _validate_time_grid(t: torch.Tensor) -> None:
         raise ValueError("t must contain at least two time points")
 
 
+def _validate_sigma_grid(sigma: torch.Tensor) -> None:
+    """Validate a 1D EDM noise grid."""
+    if sigma.dim() != 1:
+        raise ValueError(f"sigma must be 1D, got {sigma.shape}")
+    if not torch.all(torch.isfinite(sigma)):
+        raise ValueError("sigma must be finite")
+    if not torch.all(sigma >= 0):
+        raise ValueError("sigma must be non-negative")
+    if sigma.numel() < 2:
+        raise ValueError("sigma must contain at least two noise levels")
+
+
 @jaxtyped(typechecker=beartype)
 def euler_maruyama(
     drift: Callable,
@@ -253,6 +265,115 @@ def steered_reverse_sampling(
         weight_history.append(_normalized_weights(log_w))
 
     # Final resample according to accumulated weights
+    idx = _systematic_resample(log_w)
+    x = x[idx]
+    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+    trajectory[-1] = x.clone()
+    weight_history[-1] = _normalized_weights(log_w)
+
+    return torch.stack(trajectory), ess_history, torch.stack(weight_history)
+
+
+@jaxtyped(typechecker=beartype)
+def steered_reverse_edm_sampling(
+    denoise: Callable,
+    weight_update: Callable | None,
+    x: Float[Tensor, "N *rest D"],
+    sigma: Float[Tensor, " S"],
+    noise_scale: float = 1.0,
+    step_scale: float = 1.0,
+    ess_threshold: float | int = 0.5,
+) -> tuple[Float[Tensor, "S N *rest D"], list[float], Float[Tensor, "S N"]]:
+    """FKC-steered EDM churn sampling on a strictly decreasing noise grid.
+
+    This follows the EDM operator split using the next larger grid level. At
+    each step after the first,
+
+    `sigma_hat = sigma[step - 1]`,
+    `x_noisy = x + noise_scale
+                   * sqrt(sigma_hat**2 - sigma_curr**2) * noise`,
+    `direction = (x_noisy - denoise(x_noisy, sigma_hat, ...)) / sigma_hat`,
+    `x_next = x_noisy
+              + step_scale * (sigma_next - sigma_hat) * direction`.
+
+    The first step cannot reheat because no larger grid level exists.
+    Reheating and deterministic denoising are separate operators; this is not
+    an Euler-Maruyama step. Every denoiser evaluation remains on the supplied
+    Karras grid.
+
+    The weight callback is evaluated at the reheated state and receives all
+    three noise levels. It returns the complete FKC log-weight increment over
+    the base grid step, so the sampler applies no additional scaling.
+
+    Args:
+        denoise: `(x_noisy, sigma_hat, sigma_curr, sigma_next) ->
+            [N, *rest, D]`; denoised estimate, including any caller-provided
+            guidance.
+        weight_update: `(x_noisy, sigma_hat, sigma_curr, sigma_next) -> [N]`;
+            direct log-weight increment over the base step.
+        x: Initial particles `[N, *rest, D]`.
+        sigma: Strictly decreasing 1D noise grid `[S]`, with non-negative values.
+        noise_scale: Multiplier for the reheat noise.
+        step_scale: Multiplier for the deterministic Euler denoising step.
+        ess_threshold: Resampling strategy, identical to
+            `steered_reverse_sampling`: adaptive for `0 < threshold < 1`, or a
+            whole-number fixed interval for `threshold >= 1`.
+
+    Returns:
+        trajectory: Particle trajectory `[S, N, *rest, D]`.
+        ess_history: ESS/N after each weight update, length `S - 1`.
+        weight_history: Normalized weights `[S, N]`, reset after resampling.
+    """
+    _validate_sigma_grid(sigma)
+    if not torch.all(sigma[1:] < sigma[:-1]):
+        raise ValueError("sigma must be strictly decreasing for steered_reverse_edm_sampling")
+    if weight_update is None:
+        raise ValueError("weight_update must be provided for steered_reverse_edm_sampling")
+    if noise_scale < 0:
+        raise ValueError(f"noise_scale must be non-negative, got {noise_scale}")
+    if step_scale <= 0:
+        raise ValueError(f"step_scale must be positive, got {step_scale}")
+    if ess_threshold <= 0:
+        raise ValueError(f"ess_threshold must be positive, got {ess_threshold}")
+    if ess_threshold >= 1 and ess_threshold != int(ess_threshold):
+        raise ValueError(
+            f"ess_threshold >= 1 selects fixed-interval resampling and must be a "
+            f"whole number of steps, got {ess_threshold}"
+        )
+    interval_mode = ess_threshold >= 1
+    resample_every = int(ess_threshold) if interval_mode else 1
+
+    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+    trajectory = [x.clone()]
+    weight_history = [_normalized_weights(log_w)]
+    ess_history: list[float] = []
+    for step, (sigma_curr, sigma_next) in enumerate(zip(sigma[:-1], sigma[1:])):
+        sigma_hat = sigma[step - 1] if step > 0 else sigma_curr
+        reheat_variance = sigma_hat.square() - sigma_curr.square()
+        if reheat_variance > 0:
+            x = x + noise_scale * torch.sqrt(reheat_variance) * torch.randn_like(x)
+
+        log_w = log_w + weight_update(x, sigma_hat, sigma_curr, sigma_next)
+        denoised = denoise(x, sigma_hat, sigma_curr, sigma_next)
+        direction = (x - denoised) / sigma_hat
+        x = x + step_scale * (sigma_next - sigma_hat) * direction
+
+        ess = _ess_ratio(log_w)
+        ess_history.append(ess)
+
+        if interval_mode:
+            should_resample = (step + 1) % resample_every == 0
+        else:
+            should_resample = ess < ess_threshold
+
+        if should_resample:
+            idx = _systematic_resample(log_w)
+            x = x[idx]
+            log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+
+        trajectory.append(x.clone())
+        weight_history.append(_normalized_weights(log_w))
+
     idx = _systematic_resample(log_w)
     x = x[idx]
     log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)

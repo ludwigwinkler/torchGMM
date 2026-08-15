@@ -4,6 +4,7 @@ from .sampling import (
     reverse_churn_sampling,
     reverse_sampling,
     steered_reverse_churn_sampling,
+    steered_reverse_edm_sampling,
     steered_reverse_sampling,
 )
 from .schedule import BetaSchedule, KarrasSchedule, LinearSchedule, Schedule, VESchedule

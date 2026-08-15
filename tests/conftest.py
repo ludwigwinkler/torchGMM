@@ -1,7 +1,7 @@
 """Pytest configuration.
 
-Single-thread PyTorch + BLAS. pytest-xdist spawns one worker per core; leaving
-PyTorch/BLAS multithreaded on top would oversubscribe the CPU and dominate runtime.
+Two threads per PyTorch/BLAS process and one pytest-xdist worker per two CPU cores
+use the available compute without oversubscribing it.
 """
 
 import os
@@ -17,6 +17,11 @@ os.environ["OPENBLAS_NUM_THREADS"] = "2"
 import torch  # noqa: E402
 
 torch.set_num_threads(2)
+
+
+def pytest_xdist_auto_num_workers(config):
+    """Use half of the available CPU cores for `pytest -n auto`."""
+    return max(1, (os.cpu_count() or 1) // 2)
 
 
 def get_local_device() -> torch.device:
