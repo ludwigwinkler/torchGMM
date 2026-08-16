@@ -6,6 +6,7 @@ from .sampling import (
 )
 from .schedule import BetaSchedule, KarrasSchedule, LinearSchedule, Schedule, VESchedule
 from .steering import (
+    steered_reverse_af3_sampling,
     steered_reverse_churn_sampling,
     steered_reverse_edm_sampling,
     steered_reverse_sampling,

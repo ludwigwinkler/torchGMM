@@ -265,6 +265,159 @@ def steered_reverse_edm_sampling(
 
 
 @jaxtyped(typechecker=beartype)
+def steered_reverse_af3_sampling(
+    denoise: Callable,
+    weight_update: Callable | None,
+    x: Float[Tensor, "N *rest D"],
+    sigma: Float[Tensor, " S"],
+    gamma_0: float = 0.8,
+    gamma_min: float = 1.0,
+    noise_scale: float = 1.0,
+    step_scale: float = 1.0,
+    ess_threshold: float | int = 0.5,
+    potential: Callable | None = None,
+    reheat_proposal: Callable | None = None,
+) -> tuple[Float[Tensor, "S N *rest D"], list[float], Float[Tensor, "S N"]]:
+    """FKC-steered AlphaFold 3 sampling on a strictly decreasing noise grid.
+
+    At each step from `sigma_curr` to `sigma_next`, the sampler applies the
+    AlphaFold 3 churn rule
+
+    `gamma = gamma_0 if sigma_next > gamma_min else 0`,
+    `sigma_hat = sigma_curr * (1 + gamma)`,
+    `x_noisy = x + noise_scale
+                   * sqrt(sigma_hat**2 - sigma_curr**2) * noise`,
+    `direction = (x_noisy - denoise(x_noisy, sigma_hat, ...)) / sigma_hat`,
+    `x_next = x_noisy
+              + step_scale * (sigma_next - sigma_hat) * direction`.
+
+    This uses the corrected noisy-state direction from the released AlphaFold 3
+    implementation. The paper's rigid coordinate augmentation is intentionally
+    omitted because it does not preserve a generic target distribution.
+
+    The sampler supports two weighting modes:
+
+    - `weight_update` is evaluated at the reheated state and returns a local
+      FKC log-weight increment over the base grid step. This is the continuous
+      small-step approximation used by the EDM sampler.
+    - `potential(x, sigma)` returns the full log tilt at a grid marginal. The
+      sampler applies the exact discrete increment
+      `potential(x_next, sigma_next) - potential(x_prev, sigma_curr)` after the
+      full AF3 step. This mode remains appropriate for AF3's finite reheat.
+
+    Exactly one of `weight_update` and `potential` must be provided. Exact
+    potential-ratio weighting assumes `denoise` defines the unsteered base
+    transition. A guided denoiser needs an additional deterministic-transport
+    proposal correction and should use `weight_update`.
+
+    `reheat_proposal` may replace the base Gaussian reheat with a guided
+    proposal. It must return both the proposed state and
+    `log K(x_noisy | x) - log Q(x_noisy | x)`, where `K` is the exact AF3
+    Gaussian reheat and `Q` is the guided proposal. This correction is added in
+    either weighting mode. The callback is only invoked when the reheat
+    variance is positive.
+
+    Args:
+        denoise: `(x_noisy, sigma_hat, sigma_curr, sigma_next) ->
+            [N, *rest, D]`; denoised estimate, including any caller-provided
+            guidance.
+        weight_update: `(x_noisy, sigma_hat, sigma_curr, sigma_next) -> [N]`;
+            local continuous-FKC log-weight increment over the base step.
+        x: Initial particles `[N, *rest, D]`.
+        sigma: Strictly decreasing 1D noise grid `[S]`, with non-negative values.
+        gamma_0: Fractional AF3 reheat while the destination noise exceeds
+            `gamma_min`.
+        gamma_min: Destination-noise threshold below which churn is disabled.
+        noise_scale: Multiplier for the reheat noise.
+        step_scale: Multiplier for the deterministic Euler denoising step.
+        ess_threshold: Resampling strategy, identical to
+            `steered_reverse_sampling`: adaptive for `0 < threshold < 1`, or a
+            whole-number fixed interval for `threshold >= 1`.
+        potential: `(x, sigma) -> [N]`; full grid-marginal log tilt used for
+            exact discrete Feynman--Kac increments.
+        reheat_proposal: `(x, sigma_hat, sigma_curr, sigma_next) ->
+            (x_noisy, log_base_over_proposal)`; optional guided reheat proposal
+            and its per-particle log-density correction. When supplied,
+            `noise_scale` is not used for reheating.
+
+    Returns:
+        trajectory: Particle trajectory `[S, N, *rest, D]`.
+        ess_history: ESS/N after each weight update, length `S - 1`.
+        weight_history: Normalized weights `[S, N]`, reset after resampling.
+    """
+    _validate_sigma_grid(sigma)
+    if not torch.all(sigma[1:] < sigma[:-1]):
+        raise ValueError("sigma must be strictly decreasing for steered_reverse_af3_sampling")
+    if (weight_update is None) == (potential is None):
+        raise ValueError("pass exactly one of weight_update or potential to steered_reverse_af3_sampling")
+    if gamma_0 < 0:
+        raise ValueError(f"gamma_0 must be non-negative, got {gamma_0}")
+    if gamma_min < 0:
+        raise ValueError(f"gamma_min must be non-negative, got {gamma_min}")
+    if noise_scale < 0:
+        raise ValueError(f"noise_scale must be non-negative, got {noise_scale}")
+    if step_scale <= 0:
+        raise ValueError(f"step_scale must be positive, got {step_scale}")
+    if ess_threshold <= 0:
+        raise ValueError(f"ess_threshold must be positive, got {ess_threshold}")
+    if ess_threshold >= 1 and ess_threshold != int(ess_threshold):
+        raise ValueError(
+            f"ess_threshold >= 1 selects fixed-interval resampling and must be a "
+            f"whole number of steps, got {ess_threshold}"
+        )
+    interval_mode = ess_threshold >= 1
+    resample_every = int(ess_threshold) if interval_mode else 1
+
+    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+    trajectory = [x.clone()]
+    weight_history = [_normalized_weights(log_w)]
+    ess_history: list[float] = []
+    for step, (sigma_curr, sigma_next) in enumerate(zip(sigma[:-1], sigma[1:])):
+        x_prev = x
+        gamma = gamma_0 if sigma_next > gamma_min else 0.0
+        sigma_hat = sigma_curr * (1.0 + gamma)
+        reheat_variance = sigma_hat.square() - sigma_curr.square()
+        if reheat_variance > 0:
+            if reheat_proposal is None:
+                x = x + noise_scale * torch.sqrt(reheat_variance) * torch.randn_like(x)
+            else:
+                x, log_base_over_proposal = reheat_proposal(x, sigma_hat, sigma_curr, sigma_next)
+                log_w = log_w + log_base_over_proposal
+
+        if weight_update is not None:
+            log_w = log_w + weight_update(x, sigma_hat, sigma_curr, sigma_next)
+        denoised = denoise(x, sigma_hat, sigma_curr, sigma_next)
+        direction = (x - denoised) / sigma_hat
+        x = x + step_scale * (sigma_next - sigma_hat) * direction
+        if potential is not None:
+            log_w = log_w + potential(x, sigma_next) - potential(x_prev, sigma_curr)
+
+        ess = _ess_ratio(log_w)
+        ess_history.append(ess)
+
+        if interval_mode:
+            should_resample = (step + 1) % resample_every == 0
+        else:
+            should_resample = ess < ess_threshold
+
+        if should_resample:
+            idx = _systematic_resample(log_w)
+            x = x[idx]
+            log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+
+        trajectory.append(x.clone())
+        weight_history.append(_normalized_weights(log_w))
+
+    idx = _systematic_resample(log_w)
+    x = x[idx]
+    log_w = torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+    trajectory[-1] = x.clone()
+    weight_history[-1] = _normalized_weights(log_w)
+
+    return torch.stack(trajectory), ess_history, torch.stack(weight_history)
+
+
+@jaxtyped(typechecker=beartype)
 def steered_reverse_churn_sampling(
     drift: Callable,
     transition: Callable | None = None,
@@ -414,4 +567,3 @@ def steered_reverse_churn_sampling(
         weight_history[-1] = _normalized_weights(log_w)
 
     return torch.stack(trajectory), ess_history, torch.stack(weight_history)
-

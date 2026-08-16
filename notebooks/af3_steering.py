@@ -9,10 +9,11 @@ each with its own y-range adapted to the min/max in that segment.
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
+import numpy
 import torch
 from _utils import plt_show
 
-from torchGMM import GMM, KarrasSchedule, VESchedule, forward_sampling
+from torchGMM import GMM, KarrasSchedule, VESchedule, forward_sampling, steered_reverse_af3_sampling
 from torchGMM.sampling import reverse_sampling
 from torchGMM.steering import steered_reverse_sampling
 
@@ -338,82 +339,23 @@ plt_show()
 # %% [markdown]
 # # AF3 Reverse Diffusion (Algorithm 18)
 #
-# Implements AF3 supplement Algorithm 18 verbatim, minus the 3D-only
-# `CentreRandomAugmentation` (no-op for 1D scalars). The DiffusionModule role is
-# played by the analytical Tweedie denoiser
+# Uses `steered_reverse_af3_sampling` with zero FKC increments, so this section
+# shows the unsteered AF3 process. The 3D-only `CentreRandomAugmentation` is
+# omitted because it would change this scalar GMM target. The denoiser role is
+# played by the GMM's analytical Tweedie denoiser
 #     D(x, σ̂) = E[x_0 | x_σ̂] = x + σ̂² · ∇log p_{σ̂}(x),
-# where the score is computed in closed form by the GMM at the time t(σ̂)
-# obtained by inverting the Karras σ-schedule.
+# evaluated directly at arbitrary σ̂, including off-grid reheated levels.
 #
-# Hyperparameters from the paper:
-#     γ_0 = 0.8, γ_min = 1.0,  noise_scale λ = 1.003,  step_scale η = 1.5.
+# This repository keeps AF3's γ_0=0.8 and γ_min=1.0, but uses neutral
+# noise_scale λ=1.0 and step_scale η=1.0.
 #
 # Note on line 9 of Algorithm 18 (`δ = (x_l − x_denoised)/t̂`): as printed it
 # uses the pre-noise-injection `x_l`. Standard EDM (Karras 2022) and the AF3
 # reference implementation use `(x_noisy − x_denoised)/t̂` — the consensus is
-# that the supplement has a typo. The flag `USE_PAPER_DELTA` toggles between
-# the literal-paper form and the EDM-corrected form.
+# that the supplement has a typo. The public sampler uses the corrected form.
+
 
 # %%
-USE_PAPER_DELTA = False  # False -> EDM-style; True -> verbatim Algorithm 18 line 9
-
-
-def af3_denoiser(x: torch.Tensor, sigma_hat: torch.Tensor, gmm_: GMM) -> torch.Tensor:
-    """Analytical Tweedie denoiser at arbitrary σ̂, bypassing any schedule t-grid.
-
-    For a VE process (α≡1) the noised GMM at level σ̂ is itself a GMM with
-    component variances σ_k² + σ̂², so its score is closed-form. This avoids
-    the `Schedule._clamp_t` saturation that occurs whenever γ-churn inflates
-    σ̂ above the schedule's σ_max (which would otherwise compute the score at
-    the wrong noise level — the bug that produced the spurious contraction).
-    """
-    # Effective component σ at the current noise level.
-    sigma_eff = (gmm_.sigma**2 + sigma_hat**2).sqrt()  # [*B, K, D]
-    # Build a noised GMM with identity schedule: querying it at t=0 returns
-    # exactly the σ̂-marginal score. Re-using the parent's schedule is fine
-    # because score(x, t=0) only uses (μ, σ_eff, weight) at α=1, σ=0.
-    noised = GMM(mu=gmm_.mu.clone(), sigma=sigma_eff, weight=gmm_.weight.clone(), schedule=gmm_.schedule)
-    score_hat = noised.score(x, t=torch.tensor(0.0))  # [*N, *B, D]
-    return x + sigma_hat**2 * score_hat
-
-
-def sample_diffusion(
-    gmm_: GMM,
-    sigma_grid_desc: torch.Tensor,  # [c_0, c_1, ..., c_T] descending; c_0 = σ_max, c_T = σ_min
-    n_particles: int,
-    gamma_0: float = 0.8,
-    gamma_min: float = 1.0,
-    noise_scale: float = 1.003,
-    step_scale: float = 1.5,
-    use_paper_delta: bool = USE_PAPER_DELTA,
-) -> torch.Tensor:
-    """AF3 Algorithm 18, returning the full trajectory [T+1, N, *B, D]."""
-    *B, _, D = gmm_.mu.shape  # *batch, K, D
-    c0 = sigma_grid_desc[0]
-    x = c0 * torch.randn(n_particles, *B, D)  # line 1
-    traj = [x.clone()]
-    for tau in range(1, sigma_grid_desc.numel()):  # line 2
-        c_prev = sigma_grid_desc[tau - 1]
-        c_curr = sigma_grid_desc[tau]
-        # line 3: CentreRandomAugmentation — identity in 1D / unconditional toy.
-        gamma = gamma_0 if c_curr > gamma_min else 0.0  # line 4 (paper text)
-        t_hat = c_prev * (gamma + 1.0)  # line 5
-        # line 6-7: noise injection — guarded sqrt for the γ=0 case.
-        var_inject = (t_hat**2 - c_prev**2).clamp(min=0.0)
-        xi = noise_scale * torch.sqrt(var_inject) * torch.randn_like(x)
-        x_noisy = x + xi
-        # line 8: denoise at the inflated noise level t̂ (analytical, schedule-free).
-        x_denoised = af3_denoiser(x_noisy, t_hat, gmm_)
-        # line 9: δ = (x_? − x_denoised)/t̂  (see USE_PAPER_DELTA note).
-        ref = x if use_paper_delta else x_noisy
-        delta = (ref - x_denoised) / t_hat
-        # lines 10-11: Heun-style update with step scaling η.
-        dt = c_curr - t_hat
-        x = x_noisy + step_scale * dt * delta
-        traj.append(x.clone())
-    return torch.stack(traj)
-
-
 # AF3 eq. 7 places σ_max at AF3-t=0 and σ_min at AF3-t=1 — i.e. opposite to our
 # `KarrasSchedule`'s forward convention. Build the descending grid by flipping.
 # Also keep an "AF3 step-progress" axis going noise (0) → data (1) for plotting.
@@ -422,12 +364,39 @@ sigma_grid_desc = af3_sched.get_sigma_t(t_grid).flip(0)  # c_0 = σ_max … c_T 
 assert sigma_grid_desc[0] > sigma_grid_desc[-1]
 
 N_AF3 = 2_000
+torch.manual_seed(0)
+x_af3 = gmm_af3.sample(shape=N_AF3, t=torch.tensor(1.0))
+
+
+def zero_af3_potential(x, sigma):
+    return torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
+
+
 torch.manual_seed(1)
-traj_af3 = sample_diffusion(
-    gmm_af3,
-    sigma_grid_desc=sigma_grid_desc,
-    n_particles=N_AF3,
-).detach()  # [T_AF3+1, N, 1, 1]
+traj_af3, _, _ = steered_reverse_af3_sampling(
+    denoise=lambda x, sigma_hat, sigma_curr, sigma_next: (
+        x
+        + sigma_hat.square()
+        * GMM(
+            mu=gmm_af3.mu,
+            sigma=torch.sqrt(
+                gmm_af3.sigma.square()
+                + sigma_hat.square()
+                - gmm_af3.schedule.get_sigma_t(torch.zeros((), dtype=x.dtype, device=x.device)).square()
+            ),
+            weight=gmm_af3.weight,
+            schedule=gmm_af3.schedule,
+        ).score(x, t=0.0)
+    ),
+    weight_update=None,
+    x=x_af3,
+    sigma=sigma_grid_desc,
+    noise_scale=1.0,
+    step_scale=1.0,
+    ess_threshold=T_AF3 + 1,
+    potential=zero_af3_potential,
+)
+traj_af3 = traj_af3.detach()  # [T_AF3+1, N, 1, 1]
 
 # Reference densities: clean data marginal (t=0) and noise prior (t=1).
 xs_af3 = torch.linspace(-8, 8, 500).reshape(-1, 1, 1)
@@ -566,7 +535,7 @@ ax_hist.bar(xs_np_af3, h_af3.numpy(), width=dx, alpha=0.45, color="darkorange", 
 ax_hist.set_xlim(-8, 8)
 ax_hist.set_xlabel("x")
 ax_hist.set_ylabel("density")
-ax_hist.set_title(f"final marginal  ($T={T_AF3}$, $\\eta={1.5}$, $\\lambda={1.003}$, $\\gamma_0={0.8}$)")
+ax_hist.set_title(f"final marginal  ($T={T_AF3}$, $\\eta={1.0}$, $\\lambda={1.0}$, $\\gamma_0={0.8}$)")
 ax_hist.legend(fontsize=8)
 
 plt_show()
@@ -579,8 +548,6 @@ plt_show()
 # t̂_τ, ε_τ — to verify the values are doing what we expect.
 
 # %%
-import numpy
-
 t = numpy.linspace(0, 1, 200)
 
 s_max = 160
@@ -597,8 +564,8 @@ plt_show()
 
 y0 = 0.8
 ymin = 1.0
-lam = 1.003
-eta = 1.5
+lam = 1.0
+eta = 1.0
 
 y = lambda c: y0 if c > ymin else 0.0
 
