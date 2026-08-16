@@ -41,7 +41,10 @@ $$
 The weight has the same form for every $\alpha$; $\alpha$ changes the
 trajectory on which it is evaluated. The extra diffusion $\alpha$ changes the trajectory but does not change the marginal distribution of the process, as both extra diffusion is counteracted with extra score correction.
 Thus the marginal distribution of $x_t$ remains $q_t(x)$ and except for numerical considerations, the log weights are calculated independently from $\alpha$.
-This is of interest to the EDM solver used in Alphafold3 which for the last 30% or so of reverse diffusion switches to $\alpha=0$.
+This is relevant to the AlphaFold 3 solver, which gates churn off when the
+destination noise level reaches $1$ Å. With its published 200-step schedule,
+this makes approximately the final 20% of reverse diffusion deterministic; see
+[`af3_sampler.md`](af3_sampler.md).
 
 ## FKC correctors in $\sigma$-space
 
@@ -54,8 +57,8 @@ s_\sigma(x)=\nabla_x\log q(x;\sigma)
 \tag{3}
 $$
 
-For an exact `GMM`, $D_\theta(x;\sigma)$ is available as
-`gmm.denoise(x, schedule.time(sigma))`.
+For an exact VE `GMM`, use Tweedie's identity directly:
+`x + sigma**2 * gmm.score(x, schedule.time(sigma))`.
 
 `KarrasSchedule` uses repository time $s$, increasing from
 $\sigma_{\min}$ to $\sigma_{\max}$. Here $t$ is denoising progress:

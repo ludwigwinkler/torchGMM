@@ -230,41 +230,6 @@ class GMM(torch.nn.Module):
         return -self.log_prob(x, t)
 
     @jaxtyped(typechecker=beartype)
-    def denoise(
-        self, x: Float[Tensor, "*batch D"], t: int | float | torch.Tensor | None = None
-    ) -> Float[Tensor, "*batch D"]:
-        """Return the exact posterior mean E[x_0 | x_t = x].
-
-        Args:
-            x: Noisy samples `[*N, *B, D]`.
-            t: Scalar or `[*N, *B]` schedule time in `[0, 1]`.
-
-        Returns:
-            Posterior clean-sample mean `[*N, *B, D]`.
-        """
-        assert x.shape[-1] == self.dim, f"x last dim must be {self.dim}, got {x.shape[-1]}"
-        assert x.shape[-(self.batch_ndim + 1) : -1] == self.batch_shape, (
-            f"x must have batch dims {self.batch_shape} before last, got {x.shape}"
-        )
-        sample_shape = x.shape[: -(self.batch_ndim + 1)]
-        t_exp = self._expand_t(t, sample_shape)  # [*N, *B]
-
-        alpha_t = self.schedule.get_alpha_t(t_exp).unsqueeze(-1).unsqueeze(-1)  # [*N, *B, 1, 1]
-        noise_variance = self.schedule.get_sigma_t(t_exp).square().unsqueeze(-1).unsqueeze(-1)
-        component_variance = self.sigma.square()  # [*B, K, D]
-        x_components = x.unsqueeze(-2)  # [*N, *B, 1, D]
-
-        noisy_mean = alpha_t * self.mu  # [*N, *B, K, D]
-        noisy_variance = alpha_t.square() * component_variance + noise_variance  # [*N, *B, K, D]
-        component_log_prob = -0.5 * (
-            (x_components - noisy_mean).square() / noisy_variance + torch.log(2 * torch.pi * noisy_variance)
-        ).sum(dim=-1)
-        responsibilities = torch.softmax(component_log_prob + self.weight.log(), dim=-1)  # [*N, *B, K]
-
-        posterior_mean = (noise_variance * self.mu + alpha_t * component_variance * x_components) / noisy_variance
-        return (responsibilities.unsqueeze(-1) * posterior_mean).sum(dim=-2)
-
-    @jaxtyped(typechecker=beartype)
     @torch.enable_grad()
     def score(
         self, x: Float[Tensor, "*batch D"], t: int | float | torch.Tensor | None = None
@@ -347,7 +312,9 @@ class GMM(torch.nn.Module):
         return self._gmm_t(t_exp).sample()
 
     def __repr__(self):
-        return f"GMM(mu={self.mu.shape}, sigma={self.sigma.shape}, weight={self.weight.shape})"
+        return (
+            f"GMM(mu={self.mu.shape}, sigma={self.sigma.shape}, weight={self.weight.shape}, schedule={self.schedule})"
+        )
 
 
 class Conditional(GMM):

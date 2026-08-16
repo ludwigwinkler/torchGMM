@@ -36,17 +36,6 @@ def karras_setup():
 
 
 class TestEdmSigmaIdentities:
-    def test_tweedie_score_identity(self, karras_setup):
-        gmm, schedule = karras_setup
-        sigma = torch.tensor(0.7, dtype=torch.float64)
-        repo_time = schedule.time(sigma)
-        x = torch.linspace(-2.5, 2.5, 17, dtype=torch.float64).reshape(-1, 1, 1)
-
-        denoiser = gmm.denoise(x, repo_time)
-        expected_score = (denoiser - x) / sigma.square()
-
-        torch.testing.assert_close(gmm.score(x, repo_time), expected_score, rtol=1e-10, atol=1e-10)
-
     @pytest.mark.parametrize("rho", [1.0, 3.0, 7.0])
     def test_karras_map_inverse_and_derivative(self, rho):
         schedule = KarrasSchedule(sigma_min=0.05, sigma_max=3.0, rho=rho)
@@ -218,7 +207,7 @@ class TestSteeredReverseEdmSamplingMarginals:
         gmm, schedule = setup
 
         def denoise(x, sigma_hat, sigma_curr, sigma_next):
-            return gmm.denoise(x, schedule.time(sigma_hat))
+            return x + sigma_hat.square() * gmm.score(x, schedule.time(sigma_hat))
 
         def zero_weight_update(x, sigma_hat, sigma_curr, sigma_next):
             return torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
@@ -300,7 +289,7 @@ class TestSteeredReverseEdmSamplingMarginals:
 
         def denoise(x, sigma_hat, sigma_curr, sigma_next):
             t = schedule.time(sigma_hat)
-            denoised = gmm.denoise(x, t)
+            denoised = x + sigma_hat.square() * gmm.score(x, t)
             reheat_variance = sigma_hat.square() - sigma_curr.square()
             guidance = (
                 sigma_hat * beta_sigma(sigma_hat) * grad_reward(x) * reheat_variance / (2.0 * (sigma_hat - sigma_next))
