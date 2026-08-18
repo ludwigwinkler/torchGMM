@@ -1,315 +1,220 @@
-# Continuous Feynman--Kac Steering for Churn Samplers
+## Guided trajectory and weight differential
 
-`steered_reverse_churn_sampling` combines EDM-style churn with the
-continuous Feynman--Kac-Corrector (FKC) weight used by
-`steered_reverse_sampling`.  The sampler has one steering contract:
-
-```python
-trajectory, ess_history, weight_history = steered_reverse_churn_sampling(
-    drift, schedule.transition, weight_update, x, t, churn=1.0
-)
-```
-
-`weight_update` is required. It returns an instantaneous log-importance-weight
-rate and owns all target-specific compensation for the caller's guided drift. `churn`
-may be a non-negative scalar or a callback `churn(t) -> non-negative float`.
-
-## Churn step semantics
-
-Schedule time increases from data (`t=0`) to noise (`t=1`).  The sampler
-requires a strictly decreasing grid.  For one step, write
-
-$$
-h_i=t_i-t_{i+1}>0,\qquad
-\kappa_i=\operatorname{churn}(t_i),\qquad
-\hat t_i=\min(t_i+\kappa_i h_i,1),\qquad
-\Delta t_{\mathrm{transport}}=t_{i+1}-\hat t_i<0.
-$$
-
-It first draws the exact forward transition
-
-$$
-\hat x_i\sim q(\,\cdot\mid x_i;t_i,\hat t_i),
-$$
-
-then uses the caller's probability-flow drift for the deterministic move
-
-$$
-x_{i+1}=\hat x_i+
-\operatorname{drift}(\hat x_i,\hat t_i)
-\Delta t_{\mathrm{transport}}.
-$$
-
-The score follows the state: evaluate the velocity, guided drift, denoiser,
-and FKC callback at the reheated pair $(\hat x_i,\hat t_i)$, never at
-$(\hat x_i,t_i)$. `Schedule.transition` supplies the stochasticity; the
-drift must therefore be a probability-flow velocity, not a reverse-SDE
-drift with an additional score correction.
-
-In the implementation this is:
-
-```python
-base_step = t_curr - t_next
-churn_value = churn(t_curr) if callable(churn) else churn
-t_hat = (t_curr + churn_value * base_step).clamp(max=1.0)
-transport_dt = t_next - t_hat
-
-if t_hat > t_curr:
-    x = transition(x, t_curr, t_hat)
-log_w += weight_update(x, t_hat) * base_step
-x = x + drift(x, t_hat) * transport_dt
-```
-
-The callback receives no step argument. The solver multiplies its rate by
-`base_step`, the base reverse-grid magnitude; it does not use the longer
-transport span.
-
-## Continuous FKC weight and guidance
-
-For
-
-$$
-dX_t=f(X_t,t)\,dt+g(t)\,dW_t,\qquad
-v_t=f_t-\frac12g_t^2s_t,
-$$
-
-the fine-grid limit of time-dependent churn $\kappa_t$ has reverse-time
-diffusion $g_{\kappa_t}=\sqrt{\kappa_t}\,g$ and base drift
-
-$$
-b_{\kappa_t}=f-\frac{1+\kappa_t}{2}g^2s.
-$$
-
-### Backward-time differential
-
-All reverse equations in this document use the original schedule clock: time
-still increases from data to noise, so sampling takes **negative** increments
-$dt<0$. Let
-
-$$
-s_t(x)=\nabla_x\log q_t(x),\qquad
-\kappa_t=\operatorname{churn}(t),\qquad
-d\bar W_t\,d\bar W_t^\mathsf{T}=-dt\,I.
-$$
-
-The last identity defines the reverse Brownian increment: for a finite
-backward step, $d\bar W_t=\sqrt{-dt}\,\epsilon$ with
-$\epsilon\sim\mathcal N(0,I)$. The unsteered fine-grid process represented by
-the churn split is therefore
+Let $q_t$ be the unsteered marginal, $f_t$ and $g_t$ the forward SDE drift
+and diffusion coefficient, and $\alpha\geq0$ the reverse-SDE family
+parameter. For the tilted target
+$p_t(x)\propto q_t(x)\exp\!\left(\beta_t r(x,t)\right)$, the guided
+trajectory in denoising-direction time is
 
 $$
 \boxed{\;
-dX_t=
-\left[
-f(X_t,t)
--\frac{1+\kappa_t}{2}g(t)^2s_t(X_t)
-\right]dt
-+\sqrt{\kappa_t}\,g(t)\,d\bar W_t,
-\qquad dt<0.
+\begin{aligned}
+dx_t=\Bigg[
+&-f_t(x_t)
++\frac{1+\alpha^2}{2}g_t^2\nabla\log q_t(x_t)\\
+&+\beta_t\frac{\alpha^2g_t^2}{2}\nabla r(x_t,t)
+\Bigg]dt
++\alpha g_t\,dW_t.
+\end{aligned}
 \;}
+\tag{1}
 $$
 
-For a reward tilt $\rho_t(x)=\beta(t)r_t(x)$, define
-
-$$
-a_t=\frac{\beta(t)\kappa_t g(t)^2}{2}.
-$$
-
-The guided process is
+The corresponding Feynman--Kac log-weight differential is
 
 $$
 \boxed{\;
-dX_t=
-\left[
-f(X_t,t)
--\frac{1+\kappa_t}{2}g(t)^2s_t(X_t)
-+a_t\nabla_x r_t(X_t)
-\right]dt
-+\sqrt{\kappa_t}\,g(t)\,d\bar W_t,
-\qquad dt<0.
+\begin{aligned}
+dw_t=\Bigg[
+&\frac{\partial\beta_t}{\partial t}r(x_t,t)
++\beta_t\frac{\partial r(x_t,t)}{\partial t}\\
+&+\left\langle
+\beta_t\nabla r(x_t,t),
+\frac{g_t^2}{2}\nabla\log q_t(x_t)-f_t(x_t)
+\right\rangle
+\Bigg]dt.
+\end{aligned}
 \;}
+\tag{2}
 $$
 
-Thus an Euler--Maruyama step on a decreasing grid
-$dt_i=t_{i+1}-t_i<0$ is
+The weight has the same form for every $\alpha$; $\alpha$ changes the
+trajectory on which it is evaluated. The extra diffusion $\alpha$ changes the trajectory but does not change the marginal distribution of the process, as both extra diffusion is counteracted with extra score correction.
+Thus the marginal distribution of $x_t$ remains $q_t(x)$ and except for numerical considerations, the log weights are calculated independently from $\alpha$.
+This is of interest to the EDM solver used in Alphafold3 which for the last 30% or so of reverse diffusion switches to $\alpha=0$.
+
+## FKC correctors in $\sigma$-space
+
+For VE/EDM marginals $x_\sigma=x_0+\sigma\epsilon$, let
+
+$$
+\Delta_i=\sigma_i^2-\sigma_{i+1}^2>0,\qquad
+s_\sigma(x)=\nabla_x\log q(x;\sigma)
+=-\frac{x - D_\theta(x;\sigma)}{\sigma^2}.
+\tag{3}
+$$
+
+For the Karras grid, with generation time $t\in[0,1]$,
+
+$$
+\sigma(t)=
+\left[
+\sigma_{\max}^{1/\rho}
++t\left(\sigma_{\min}^{1/\rho}-\sigma_{\max}^{1/\rho}\right)
+\right]^\rho.
+\tag{4}
+$$
+
+Its inverse is
+
+$$
+t(\sigma)=
+\frac{\sigma_{\max}^{1/\rho}-\sigma^{1/\rho}}
+{\sigma_{\max}^{1/\rho}-\sigma_{\min}^{1/\rho}}.
+\tag{5}
+$$
+
+Therefore,
 
 $$
 \begin{aligned}
-X_{i+1}={}&X_i+
-\left[
-f(X_i,t_i)
--\frac{1+\kappa_i}{2}g(t_i)^2s_{t_i}(X_i)
-+a_i\nabla_x r_{t_i}(X_i)
-\right]dt_i\\
-&+\sqrt{\kappa_i}\,g(t_i)\sqrt{-dt_i}\,\epsilon_i,
-\qquad
-\epsilon_i\sim\mathcal N(0,I),\quad
-\kappa_i=\operatorname{churn}(t_i).
+\frac{dt}{d\sigma}
+&=\frac{1}
+{\sigma_{\max}^{1/\rho}-\sigma_{\min}^{1/\rho}}
+\frac{d}{d\sigma}\left(-\sigma^{1/\rho}\right)\\
+&=-\frac{1}
+{\sigma_{\max}^{1/\rho}-\sigma_{\min}^{1/\rho}}
+\frac{1}{\rho}\sigma^{1/\rho-1}\\
+&=\frac{\sigma^{1/\rho-1}}
+{\rho\left(\sigma_{\min}^{1/\rho}-\sigma_{\max}^{1/\rho}\right)},\\
+dt
+&=\frac{\sigma^{1/\rho-1}}
+{\rho\left(\sigma_{\min}^{1/\rho}-\sigma_{\max}^{1/\rho}\right)}
+\,d\sigma.
 \end{aligned}
+\tag{6}
 $$
 
-`steered_reverse_churn_sampling` does **not** take this Euler step directly.
-Instead, it realizes the same infinitesimal backward generator by an exact
-forward reheat followed by a probability-flow transport. With
-$h_i=-dt_i>0$, its two signed time increments are
+A time-indexed tilt schedule is converted to $\sigma$-space by composition
+with the inverse noise schedule:
 
 $$
-d t_{\rm reheat}=\kappa_i h_i>0,\qquad
-d t_{\rm transport}=-(1+\kappa_i)h_i<0.
+\begin{aligned}
+\beta_\sigma(\sigma)
+&=\beta_t(t(\sigma)),\\
+\frac{d\beta_\sigma}{d\sigma}
+&=\left.\frac{d\beta_t}{dt}\right|_{t=t(\sigma)}
+\frac{dt}{d\sigma},\\
+\beta_t(t)=1-t
+&\quad\Longrightarrow\quad
+\beta_\sigma(\sigma)=\beta_t(t(\sigma))=1-t(\sigma),\\
+\frac{d\beta_\sigma}{d\sigma}
+&=-\frac{dt}{d\sigma}.
+\end{aligned}
+\tag{7}
 $$
 
-The reheat is an exact draw from $q_{t_i}$ to $q_{t_i+d t_{\rm reheat}}$; the
-transport then integrates the caller-supplied probability-flow drift over
-$d t_{\rm transport}$. The factor $1/(1+\kappa_i)$ in the supplied guidance
-field makes that longer transport produce exactly the $a_i\nabla r\,dt_i$
-term in the boxed backward differential.
+Here $t(\sigma)=\sigma_{\rm sched}^{-1}(\sigma)$ denotes the inverse
+schedule, not the reciprocal $1/\sigma$.
 
-The deterministic leg lasts $(1+\kappa_i)h_i$, so the caller divides the
-guidance field by $1+\kappa_t$:
-
-```python
-def guided_drift(x, t):
-    kappa = churn(t) if callable(churn) else churn
-    g2 = schedule.diffusion_coeff(t).square()
-    guidance = beta(t) * kappa * g2 / (2 * (1 + kappa)) * grad_reward(x, t)
-    return gmm.velocity(x, t) + guidance
-```
-
-Writing the backward base-grid step as $dt>0$, so that
-$t_{\rm next}=t-dt$, the entire deterministic drift of the effective
-guided reverse process is
+For VE, $f_t=0$, and the diffusion coefficient is fixed by the marginal
+variance. On a generation clock for which $\sigma$ decreases,
 
 $$
 \boxed{\;
-x_{t-dt}
-=x_t-dt\left[
-f(x_t,t)
--\frac{1+\kappa_t}{2}g(t)^2s_t(x_t)
-+\underbrace{\frac{\beta(t)\kappa_t g(t)^2}{2}}_{a_t}
-\nabla_x r_t(x_t)
-\right].
+g_t^2\,dt=-d(\sigma^2)=-2\sigma\,d\sigma.
 \;}
+\tag{8}
 $$
 
-Equivalently,
+This identity holds for any monotone noise schedule. In particular, all
+Karras parameters cancel: $\rho$ controls grid placement, while the
+trajectory and weight depend on $-2\sigma\,d\sigma$.
 
-$$
-a_t=\frac{\beta(t)\kappa_t g(t)^2}{2}.
-$$
+### Guided equations in $\sigma$-space
 
-The sampler realizes this through its reheat-then-transport split. Away from
-the $t=1$ clamp, it first draws $\hat x_{\hat t}$ at
-$\hat t=t+\kappa_t dt$, then takes the deterministic transport step
+Substituting $f_t=0$ and (8) into (1) gives
 
 $$
 \boxed{\;
-x_{t-dt}
-=\hat x_{\hat t}
--(1+\kappa_t)dt\left[
-v(\hat x_{\hat t},\hat t)
-+\frac{a_{\hat t}}{1+\kappa_t}\nabla_x r_{\hat t}(\hat x_{\hat t})
-\right].
+dx=
+-\sigma\left[
+(1+\alpha^2)s_\sigma(x)
++\alpha^2\beta_\sigma\nabla r(x,\sigma)
+\right]d\sigma
++\alpha\,d\bar W_\sigma,
+\qquad
+d\bar W_\sigma d\bar W_\sigma^\mathsf{T}
+=-2\sigma\,d\sigma\,I.
 \;}
+\tag{9}
 $$
 
-The exact forward reheat supplies the stochasticity and its first-order
-forward drift; together with this transport it yields the effective reverse
-drift above.
-
-### Matching $\beta(t)$ to $g(t)^2$
-
-The field that appears in the backward guided SDE is not $\beta(t)$ alone,
-but
-
-$$
-a_t=\frac12\beta(t)\kappa_t g(t)^2.
-$$
-
-Thus, choose $\beta(t)$ from the desired guidance amplitude, rather than
-treating it as independent of the schedule. A regularized choice for a
-nominal coefficient $a_{\rm target}(t)$ is
+Likewise, (2) becomes
 
 $$
 \boxed{\;
-\beta(t)=\frac{2a_{\rm target}(t)}
-{\kappa_t\left(1+g(t)^2\right)}.
+dw=
+\left[
+\frac{d\beta_\sigma}{d\sigma}r(x,\sigma)
++\beta_\sigma\frac{\partial r(x,\sigma)}{\partial\sigma}
+-\sigma
+\left\langle\beta_\sigma\nabla r(x,\sigma),s_\sigma(x)\right\rangle
+\right]d\sigma.
 \;}
+\tag{10}
 $$
 
-It gives the bounded effective coefficient
+Equation (9) is the guided proposal trajectory; equation (10) is its
+Feynman--Kac correction. Their roles are distinct: the proposal moves
+particles toward the tilted target, while the weight corrects the remaining
+change in measure.
+
+### Discrete Karras grid
+
+Using the exact variance gap
+$\Delta_i=\sigma_i^2-\sigma_{i+1}^2$, a first-order step for (9) is
 
 $$
 \boxed{\;
-a_t=a_{\rm target}(t)\frac{g(t)^2}{1+g(t)^2}.
+\begin{aligned}
+x_{i+1}=x_i
+&+\left[
+\frac{1+\alpha^2}{2}s_{\sigma_i}(x_i)
++\frac{\alpha^2\beta_i}{2}\nabla r(x_i,\sigma_i)
+\right]\Delta_i\\
+&+\alpha\sqrt{\Delta_i}\,\epsilon_i,
+\qquad \epsilon_i\sim\mathcal N(0,I).
+\end{aligned}
 \;}
+\tag{11}
 $$
 
-In particular, choosing
+Evaluating (10) over the same gap gives
 
 $$
-\beta(t)=\frac{c(t)}{1+g(t)^2}
-\quad\Longrightarrow\quad
-a_t=\frac{\kappa_t c(t)}{2}\frac{g(t)^2}{1+g(t)^2}
+\boxed{\;
+\Delta w_i=
+\beta_{i+1}r(x_i,\sigma_{i+1})
+-\beta_i r(x_i,\sigma_i)
++\frac{1}{2}
+\left\langle\beta_i\nabla r(x_i,\sigma_i),s_{\sigma_i}(x_i)\right\rangle
+\Delta_i.
+\;}
+\tag{12}
 $$
 
-caps the schedule factor at one. This is useful for VE and Karras schedules,
-where $g(t)^2$ can vary by many orders of magnitude: a constant $c$ prevents
-the guidance from becoming excessively large at times with large $g(t)^2$.
+For a time-independent reward, the first two terms in (12) reduce to
+$r(x_i)(\beta_{i+1}-\beta_i)$. The standard reverse SDE is $\alpha=1$;
+$\alpha=0$ is the probability-flow ODE, for which steering acts entirely
+through the weights.
 
-This is a choice of the **intermediate target path**:
-$p_t^{\rm tilt}(x)\propto q_t(x)\exp(\beta(t)r_t(x))$. It is not merely a
-numerical rescaling. The FKC callback must include the resulting
-$\dot\beta(t)$ term, and the chosen endpoint $\beta(0)$ determines the final
-reward tilt. Do not divide by $\kappa_t$ at a zero: when
-$\kappa_t=0$, churn contributes no stochastic guidance, and the sampler
-switches off resampling by design.
+EDM churn uses an exact reheat followed by deterministic transport rather
+than the Euler step (11). In that split scheme, evaluate (10) at the
+reheated state and advance the weight by the net variance gap $\Delta_i$.
+At the terminal $\sigma=0$ step, skip weight accumulation because the score
+is singular.
 
-The matching FKC log-weight is a bounded-variation increment.  Its
-continuous integrand is independent of `churn`, so the same
-`weight_update(x, t)` closure is valid for both the churn and Euler--Maruyama
-steered samplers. For a time-dependent reward it includes the tilt-time
-derivative and the score-alignment term. Each solver applies its own
-appropriate base-grid magnitude.
-
-```python
-def weight_update(x, t):
-    g2 = schedule.diffusion_coeff(t).square()
-    integrand = (
-        tilt_time_derivative(x, t)
-        + (beta(t) * grad_reward(x, t) * (g2 / 2) * gmm.score(x, t)).sum(dim=-1)
-    )
-    return integrand
-```
-
-The exact signs depend on whether the target is written as
-`exp(beta * reward)` or `exp(-beta * energy)`; define the guided drift and
-the callback from the same convention.
-
-## SMC behavior
-
-The sampler records normalized particle weights at every grid point and
-resamples only after a complete churn-plus-transport step:
-
-* `0 < ess_threshold < 1`: resample when `ESS / N` falls below the threshold.
-* integer `ess_threshold >= 1`: resample every that many steps.
-* the terminal particle cloud is resampled and its reported weights are uniform while
-  churn remains positive. Once `churn(t)` returns zero, resampling is permanently
-  disabled and the reported weights continue accumulating through the endpoint.
-
-Between resamples, evaluate correctness with the weighted cloud at
-intermediate times.  The tests sweep churn, adaptive/fixed resampling, and
-Beta/VE schedules against the corresponding analytic tilted marginals.
-
-## VE and Karras schedules
-
-For VE schedules, $\alpha_t=1$ and
-
-$$
-g(t)^2=\frac{d}{dt}\sigma(t)^2=2\sigma(t)\dot\sigma(t).
-$$
-
-The marginal variance $\sigma(t)^2$ and instantaneous diffusion rate
-$g(t)^2$ are distinct.  Use the latter in the FKC guidance coefficient and
-weight integrand.  Karras schedules can have large $g(t)^2$ near the noisy
-end, so start just below `t=1` and use a sufficiently fine reverse grid.
-`docs/schedule.md` gives the schedule-specific formulas.
+Sources: Skreta et al., *Feynman-Kac Correctors in Diffusion* (ICML 2025,
+arXiv:2503.02819); Karras et al., *Elucidating the Design Space of
+Diffusion-Based Generative Models* (NeurIPS 2022).
