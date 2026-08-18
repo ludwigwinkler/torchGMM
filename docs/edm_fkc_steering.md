@@ -41,7 +41,10 @@ $$
 The weight has the same form for every $\alpha$; $\alpha$ changes the
 trajectory on which it is evaluated. The extra diffusion $\alpha$ changes the trajectory but does not change the marginal distribution of the process, as both extra diffusion is counteracted with extra score correction.
 Thus the marginal distribution of $x_t$ remains $q_t(x)$ and except for numerical considerations, the log weights are calculated independently from $\alpha$.
-This is of interest to the EDM solver used in Alphafold3 which for the last 30% or so of reverse diffusion switches to $\alpha=0$.
+This is relevant to the AlphaFold 3 solver, which gates churn off when the
+destination noise level reaches $1$ Å. With its published 200-step schedule,
+this makes approximately the final 20% of reverse diffusion deterministic; see
+[`af3_sampler.md`](af3_sampler.md).
 
 ## FKC correctors in $\sigma$-space
 
@@ -54,7 +57,14 @@ s_\sigma(x)=\nabla_x\log q(x;\sigma)
 \tag{3}
 $$
 
-For the Karras grid, with generation time $t\in[0,1]$,
+For an exact VE `GMM`, use Tweedie's identity directly:
+`x + sigma**2 * gmm.score(x, schedule.time(sigma))`.
+
+`KarrasSchedule` uses repository time $s$, increasing from
+$\sigma_{\min}$ to $\sigma_{\max}$. Here $t$ is denoising progress:
+$t=1-s$, $s=\texttt{schedule.time}(\sigma)$, and
+$\sigma(t)=\texttt{schedule.get\_sigma\_t}(1-t)$, so denoising runs from
+$\sigma_{\max}$ to $\sigma_{\min}$. In closed form,
 
 $$
 \sigma(t)=
@@ -172,48 +182,74 @@ change in measure.
 
 ### Discrete Karras grid
 
-Using the exact variance gap
-$\Delta_i=\sigma_i^2-\sigma_{i+1}^2$, a first-order step for (9) is
+Let $\Delta_i=\sigma_i^2-\sigma_{i+1}^2$. Reheat to the immediately
+preceding, larger Karras grid level, then apply a denoiser Euler step:
 
 $$
 \boxed{\;
 \begin{aligned}
-x_{i+1}=x_i
-&+\left[
-\frac{1+\alpha^2}{2}s_{\sigma_i}(x_i)
-+\frac{\alpha^2\beta_i}{2}\nabla r(x_i,\sigma_i)
-\right]\Delta_i\\
-&+\alpha\sqrt{\Delta_i}\,\epsilon_i,
-\qquad \epsilon_i\sim\mathcal N(0,I).
+\hat\sigma_i
+&=\begin{cases}
+\sigma_{i-1},&i>0,\\
+\sigma_i,&i=0,
+\end{cases}\\
+\hat x_i
+&=x_i+\lambda\sqrt{\hat\sigma_i^2-\sigma_i^2}\,\epsilon_i,
+\qquad \epsilon_i\sim\mathcal N(0,I),\\
+d_i
+&=\frac{\hat x_i-D_\theta(\hat x_i;\hat\sigma_i)}
+{\hat\sigma_i},\\
+x_{i+1}
+&=\hat x_i+\eta(\sigma_{i+1}-\hat\sigma_i)d_i.
 \end{aligned}
 \;}
 \tag{11}
 $$
 
-Evaluating (10) over the same gap gives
+The first step is deterministic because no larger grid level exists. The
+reheat is the exact VE transition when $\lambda=1$; $\lambda>1$
+deliberately inflates its noise.
+Evaluating the churn-independent FKC correction at the reheated state gives
 
 $$
 \boxed{\;
 \Delta w_i=
-\beta_{i+1}r(x_i,\sigma_{i+1})
--\beta_i r(x_i,\sigma_i)
+\beta_{i+1}r(\hat x_i,\sigma_{i+1})
+-\beta_i r(\hat x_i,\sigma_i)
 +\frac{1}{2}
-\left\langle\beta_i\nabla r(x_i,\sigma_i),s_{\sigma_i}(x_i)\right\rangle
+\left\langle
+\beta_{\hat\sigma_i}\nabla r(\hat x_i,\hat\sigma_i),
+s_{\hat\sigma_i}(\hat x_i)
+\right\rangle
 \Delta_i.
 \;}
 \tag{12}
 $$
 
 For a time-independent reward, the first two terms in (12) reduce to
-$r(x_i)(\beta_{i+1}-\beta_i)$. The standard reverse SDE is $\alpha=1$;
-$\alpha=0$ is the probability-flow ODE, for which steering acts entirely
-through the weights.
+$r(\hat x_i)(\beta_{i+1}-\beta_i)$. The weight uses the base gap
+$\Delta_i$, not the longer denoising interval. Guidance may be incorporated
+into $D_\theta$; the weight callback still receives the reheated state.
 
-EDM churn uses an exact reheat followed by deterministic transport rather
-than the Euler step (11). In that split scheme, evaluate (10) at the
-reheated state and advance the weight by the net variance gap $\Delta_i$.
-At the terminal $\sigma=0$ step, skip weight accumulation because the score
-is singular.
+`steered_reverse_edm_sampling` implements this operator split:
+
+```python
+trajectory, ess_history, weight_history = steered_reverse_edm_sampling(
+    denoise,
+    weight_update,
+    x,
+    sigma,
+    noise_scale=1.0,
+    step_scale=1.0,
+    ess_threshold=0.5,
+)
+```
+
+`sigma` is strictly decreasing.
+`denoise(x_hat, sigma_hat, sigma_i, sigma_next)` returns the denoised
+estimate used in (11), and
+`weight_update(x_hat, sigma_hat, sigma_i, sigma_next)` returns the complete
+increment (12). Both callbacks are evaluated after reheating.
 
 Sources: Skreta et al., *Feynman-Kac Correctors in Diffusion* (ICML 2025,
 arXiv:2503.02819); Karras et al., *Elucidating the Design Space of

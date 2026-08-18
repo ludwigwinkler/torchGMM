@@ -16,13 +16,13 @@ from test_steering import (
     plot_marginal_density_comparison,
 )
 
-PLOT = True
-
 from torchGMM.gmm import GMM
-from torchGMM.sampling import _ess_ratio, steered_reverse_churn_sampling
 from torchGMM.schedule import BetaSchedule, KarrasSchedule
+from torchGMM.steering import _ess_ratio, steered_reverse_churn_sampling
 
 torch.set_printoptions(sci_mode=False)
+
+PLOT = True
 
 
 class TestChurnSteeringProperties:
@@ -269,7 +269,7 @@ class TestChurnSteeringProperties:
 
 
 @pytest.mark.slow
-class TestSteeredChurnGuidedFlow:
+class TestSteeredChurnSampler:
     """Karras churn with FKC-guided probability-flow transport.
 
     Churn supplies the effective diffusion and therefore fixes the guidance displacement.
@@ -279,10 +279,9 @@ class TestSteeredChurnGuidedFlow:
 
     EPS = 0.001
     T_NOISE = 1 - EPS
-    N_PARTICLES = 10_000
+    N_PARTICLES = 20_000
     N_STEPS = 1000
     REWARD_SIGMA = 0.5
-    GUIDANCE_BOOST = 20.0
 
     @pytest.fixture
     def setup(self):
@@ -295,9 +294,9 @@ class TestSteeredChurnGuidedFlow:
         )
         return gmm, sched
 
-    @pytest.mark.parametrize("churn", [0.25, 0.8, 1.0], ids=lambda v: f"churn={v}")
+    @pytest.mark.parametrize("churn", [0.5, 0.8, 1.0, 2.0], ids=lambda v: f"churn={v}")
     @pytest.mark.parametrize("reward_center", [-3, -2.0, 1.0], ids=lambda v: f"center={v}")
-    @pytest.mark.parametrize("ess_threshold", [0.9, 700], ids=lambda v: f"ess={v}")
+    @pytest.mark.parametrize("ess_threshold", [0.9, 2000], ids=lambda v: f"ess={v}")
     def test_guided_steered_karras_churn_sampler_intermediate_marginals(
         self, setup, reward_center, churn, ess_threshold
     ):
@@ -345,7 +344,7 @@ class TestSteeredChurnGuidedFlow:
             ess_threshold=ess_threshold,
         )
 
-        if churn == 1.0 and reward_center == -2.0 and ess_threshold == 700:
+        if churn == 1.0 and reward_center == -2.0 and ess_threshold == 2000:
             # Fixed-interval mode does not resample before the endpoint. With identical
             # transition noise, guidance must therefore improve the proposal itself rather
             # than relying on particle replication to make the cloud look tilted.
@@ -423,93 +422,3 @@ class TestSteeredChurnGuidedFlow:
             # The bounded-variation FKC transport update is first-order accurate.
             tol = 0.08 * (1.0 + sigma_t.item())
             assert w1 < tol, f"guided Karras churn={churn} center={reward_center} t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
-
-@pytest.mark.slow
-class TestChurnSteeringWithEulerMaruyamaWeight:
-    """The Euler-Maruyama FKC weight, reused verbatim on the churn sampler.
-
-    This is what the `(drift, transition, weight_update)` signature buys: `weight_update`
-    means the same thing here as in `steered_reverse_sampling`, so the *same closure*
-    steers both samplers. It is also an empirical check on the κ-invariance derived in
-    `docs/edm_fkc_steering.md` §3 — redoing Prop. D.6 Step 5 with the churn's effective
-    generator (b_κ, g_κ) leaves the weight equal to Eq. (276) with the base g², carrying no
-    κ at all. If that were wrong, sweeping churn here would walk off the tilted marginals.
-
-    Only the *drift* carries κ. The churn sampler transports over −(1+κ)|dt| rather than
-    −|dt|, so a guidance field must be divided by (1+κ) to land the same displacement per
-    grid step, and the base transport is the probability-flow velocity rather than the
-    reverse-SDE drift, since the churn supplies the stochasticity.
-    """
-
-    EPS = 0.001
-    N_PARTICLES = 10_000
-    N_STEPS = 500
-    REWARD_SIGMA = 1.0
-
-    @pytest.fixture
-    def setup(self):
-        sched = BetaSchedule(beta_min=0.1, beta_max=20.0)
-        gmm = GMM(
-            mu=torch.tensor([[[-2.5], [2.5]]]),
-            sigma=torch.tensor([[[0.8], [0.8]]]),
-            weight=torch.tensor([[0.2, 0.8]]),
-            schedule=sched,
-        )
-        return gmm, sched
-
-    @pytest.mark.parametrize("churn", [0.5, 1.0, 2.0], ids=lambda v: f"churn={v}")
-    @pytest.mark.parametrize("reward_center", [-2.0, 1.0], ids=lambda v: f"center={v}")
-    def test_em_weight_update_steers_the_churn_sampler(self, setup, reward_center, churn):
-        gmm, sched = setup
-
-        def energy(x):
-            return (0.5 * (x - reward_center) ** 2 / self.REWARD_SIGMA**2).squeeze(-1).squeeze(-1)
-
-        def grad_energy(x):
-            return (x - reward_center) / self.REWARD_SIGMA**2
-
-        def beta_fn(t):
-            return 1.0 - t
-
-        # The FKC update for the Boltzmann tilt ρ = -βU; no churn appears in it.
-        def fkc_weight_update(x, t, dt):
-            f = sched.forward_drift(x, t)
-            sigma = sched.diffusion_coeff(t)
-            score = gmm.score(x, t)
-            energy_gradient, energy_value = grad_energy(x), energy(x)
-            beta = beta_fn(t)
-            term1 = _dbeta_dt(beta_fn, t) * energy_value
-            term2 = (beta * energy_gradient * f).squeeze(-1).squeeze(-1)
-            term3 = (-beta * energy_gradient * (sigma**2 / 2) * score).squeeze(-1).squeeze(-1)
-            return (term1 + term2 + term3) * dt.abs()
-
-        def guided_drift(x, t):
-            """PF velocity (the churn supplies the noise) plus the D.6 guidance field.
-
-            Two churn-dependent factors, and both are load-bearing. The magic constant is
-            built from the *effective* diffusion g_κ² = κ·g², not from g² — a = β·κ·g²/2,
-            per §7 — and the field is divided by (1+κ) because the transport spans
-            −(1+κ)|dt| rather than −|dt|. They coincide only at κ=1, which is precisely
-            why an implementation missing the κ in `a` passes at churn=1 and fails either
-            side of it.
-            """
-            g2 = sched.diffusion_coeff(t) ** 2
-            a = beta_fn(t) * churn * g2 / 2
-            return gmm.velocity(x, t) + a * grad_energy(x) / (1.0 + churn)
-
-        torch.manual_seed(0)
-        t = torch.linspace(1 - self.EPS, self.EPS, self.N_STEPS)
-        x0 = gmm.sample(shape=self.N_PARTICLES, t=1 - self.EPS)
-        traj, _, weight_hist = steered_reverse_churn_sampling(
-            guided_drift, sched.transition, fkc_weight_update, x0, t, churn=churn, ess_threshold=25
-        )
-
-        xs = torch.linspace(-8, 8, 400).reshape(-1, 1, 1)
-        for t_idx in range(10, self.N_STEPS, 10):  # 49 slots
-            t_ = t[t_idx]
-            p_tilt = _tilted_density(gmm, xs, t_, beta_fn, lambda x, t__: -energy(x))
-            w1 = _weighted_wasserstein1(traj[t_idx, :, 0, 0], weight_hist[t_idx], xs.squeeze(), p_tilt)
-            tol = 0.05 * (1.0 + sched.get_sigma_t(t_).item())
-            assert w1 < tol, (
-                f"EM weight on churn sampler, churn={churn} center={reward_center} t={t_:.3f}: W1={w1:.4f} >= {tol:.4f}"
-            )

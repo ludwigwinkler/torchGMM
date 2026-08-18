@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from torchGMM import GMM, VESchedule
-from torchGMM.sampling import steered_reverse_sampling
+from torchGMM.steering import steered_reverse_sampling
 
 plt.style.use("default")
 

@@ -10,7 +10,8 @@ import numpy as np
 import torch
 
 from torchGMM import GMM, VESchedule
-from torchGMM.sampling import reverse_sampling, steered_reverse_sampling
+from torchGMM.sampling import reverse_sampling
+from torchGMM.steering import steered_reverse_sampling
 
 torch.manual_seed(0)
 torch.set_default_device("cpu")

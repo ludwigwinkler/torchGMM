@@ -57,6 +57,10 @@ ty check torchGMM
 
 `sampling.py` implements Euler-Maruyama for forward and reverse SDEs. Both `forward_sampling` and `reverse_sampling` take `drift: callable`, `diffusion: callable | None`, initial state `x`, and a time grid `t`. The caller constructs drift/diffusion callables from the schedule and GMM score before calling.
 
+`steering.py` implements the SMC/FKC samplers and their resampling helpers:
+`steered_reverse_sampling`, `steered_reverse_churn_sampling`, and
+`steered_reverse_edm_sampling`.
+
 `reverse_churn_sampling` is the EDM Algorithm 2 sampler (see `docs/churn_sampler.md`). It is an *operator splitting*, not an SDE discretisation, so it is a separate function rather than an integrator swapped into `reverse_sampling`, and its two callables are complete operators rather than the drift/diffusion terms of one SDE:
 
 ```python
