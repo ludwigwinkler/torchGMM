@@ -235,7 +235,7 @@ into $D_\theta$; the weight callback still receives the reheated state.
 
 ```python
 trajectory, ess_history, weight_history = steered_reverse_edm_sampling(
-    denoise,
+    drift,
     weight_update,
     x,
     sigma,
@@ -246,10 +246,685 @@ trajectory, ess_history, weight_history = steered_reverse_edm_sampling(
 ```
 
 `sigma` is strictly decreasing.
-`denoise(x_hat, sigma_hat, sigma_i, sigma_next)` returns the denoised
-estimate used in (11), and
+`drift(x_hat, sigma_hat, sigma_i, sigma_next)` returns the complete
+deterministic drift with respect to $\sigma^2/2$, including guidance, and
 `weight_update(x_hat, sigma_hat, sigma_i, sigma_next)` returns the complete
 increment (12). Both callbacks are evaluated after reheating.
+
+
+# Score, denoiser, and sigma-space motion from first principles
+
+## 1. Forward Gaussian noising
+
+For a variance-exploding process, a clean sample is corrupted as
+
+$$
+x_\sigma=x_0+\sigma\epsilon,
+\qquad
+\epsilon\sim\mathcal N(0,I).
+$$
+
+The noisy density is therefore
+
+$$
+q_\sigma
+=
+q_0 * \mathcal N(0,\sigma^2 I).
+$$
+
+Increasing $\sigma^2$ applies Gaussian smoothing.
+
+## 2. Evolution of the density
+
+Gaussian smoothing satisfies the heat equation:
+
+$$
+\frac{\partial q_\sigma}{\partial(\sigma^2)}
+=
+\frac12\Delta q_\sigma.
+$$
+
+A deterministic particle flow with velocity
+$u_{\sigma^2}(x)$ with respect to $\sigma^2$ satisfies the continuity
+equation:
+
+$$
+\frac{\partial q_\sigma}{\partial(\sigma^2)}
+=
+-\nabla\cdot(q_\sigma u_{\sigma^2}).
+$$
+
+Define the score
+
+$$
+s_\sigma(x)=\nabla_x\log q_\sigma(x).
+$$
+
+Because
+
+$$
+q_\sigma(x)s_\sigma(x)=\nabla q_\sigma(x),
+$$
+
+choosing
+
+$$
+u_{\sigma^2}(x)=-\frac12s_\sigma(x)
+$$
+
+gives
+
+$$
+-\nabla\cdot(q_\sigma u_{\sigma^2})
+=
+\frac12\nabla\cdot(q_\sigma s_\sigma)
+=
+\frac12\Delta q_\sigma.
+$$
+
+Thus the probability-flow ODE directly in $\sigma^2$ is
+
+$$
+\boxed{
+\frac{dx}{d(\sigma^2)}
+=
+-\frac12s_\sigma(x).
+}
+$$
+
+Equivalently,
+
+$$
+\boxed{
+dx
+=
+-\frac12s_\sigma(x)\,d(\sigma^2).
+}
+$$
+
+## 3. Convert from variance to sigma
+
+Since
+
+$$
+d(\sigma^2)=2\sigma\,d\sigma,
+$$
+
+the same ODE written in the sigma coordinate is
+
+$$
+\begin{aligned}
+dx
+&=
+-\frac12s_\sigma(x)\,d(\sigma^2)\\
+&=
+-\frac12s_\sigma(x)\,2\sigma\,d\sigma\\
+&=
+-\sigma s_\sigma(x)\,d\sigma.
+\end{aligned}
+$$
+
+Therefore,
+
+$$
+\boxed{
+\frac{dx}{d\sigma}
+=
+-\sigma s_\sigma(x).
+}
+$$
+
+The score by itself is not the sigma-space velocity. The factor
+$-\sigma$ converts the score into the velocity with respect to sigma.
+
+## 4. Relation between the score and denoiser
+
+Tweedie's identity gives the denoiser
+
+$$
+D(x,\sigma)
+=
+x+\sigma^2s_\sigma(x).
+$$
+
+Rearranging,
+
+$$
+s_\sigma(x)
+=
+\frac{D(x,\sigma)-x}{\sigma^2}
+=
+-\frac{x-D(x,\sigma)}{\sigma^2}.
+$$
+
+This confirms that
+
+$$
+-\frac{x-D(x,\sigma)}{\sigma^2}
+$$
+
+is the score.
+
+However, multiplying this score directly by $d\sigma$ does not produce the
+probability-flow motion. The coordinate conversion from variance to sigma
+still contributes the factor $-\sigma$.
+
+## 5. Sigma-space denoiser form
+
+Substitute Tweedie's identity into the sigma-space ODE:
+
+$$
+\begin{aligned}
+dx
+&=
+-\sigma s_\sigma(x)\,d\sigma\\
+&=
+-\sigma
+\frac{D(x,\sigma)-x}{\sigma^2}
+d\sigma\\
+&=
+\frac{x-D(x,\sigma)}{\sigma}
+d\sigma.
+\end{aligned}
+$$
+
+Thus the usual EDM equation is
+
+$$
+\boxed{
+\frac{dx}{d\sigma}
+=
+\frac{x-D(x,\sigma)}{\sigma}.
+}
+$$
+
+An Euler step from $\sigma_i$ to $\sigma_{i+1}$ is
+
+$$
+x_{i+1}
+=
+x_i
++
+(\sigma_{i+1}-\sigma_i)
+\frac{x_i-D(x_i,\sigma_i)}{\sigma_i}.
+$$
+
+This is the standard sigma-space EDM update.
+
+## 6. Variance-space denoiser form
+
+Start instead from the variance-space ODE:
+
+$$
+dx
+=
+-\frac12s_\sigma(x)\,d(\sigma^2).
+$$
+
+Using
+
+$$
+-s_\sigma(x)
+=
+\frac{x-D(x,\sigma)}{\sigma^2},
+$$
+
+gives
+
+$$
+\boxed{
+dx
+=
+\frac12
+\frac{x-D(x,\sigma)}{\sigma^2}
+d(\sigma^2).
+}
+$$
+
+An Euler step is therefore
+
+$$
+x_{i+1}
+=
+x_i
++
+\frac{\sigma_{i+1}^2-\sigma_i^2}{2}
+\frac{x_i-D(x_i,\sigma_i)}{\sigma_i^2}.
+$$
+
+This is exactly the form currently used by `steered_reverse_edm_sampling`:
+
+```python
+direction = (x - denoised) / sigma_hat**2
+x = x + (sigma_next**2 - sigma_hat**2) / 2 * direction
+```
+
+So the current base sampler is moving according to the score correctly, but
+it is integrating directly with respect to $\sigma^2$ rather than with
+respect to $\sigma$.
+
+## 7. Why the sign moves particles toward the denoiser
+
+During denoising,
+
+$$
+\sigma_{i+1}<\sigma_i,
+$$
+
+so
+
+$$
+\sigma_{i+1}^2-\sigma_i^2<0.
+$$
+
+The current direction is
+
+$$
+\frac{x-D}{\sigma^2}=-s_\sigma(x).
+$$
+
+Multiplying the negative variance step by the negative score gives motion in
+the positive score direction:
+
+$$
+\frac{\sigma_{i+1}^2-\sigma_i^2}{2}
+\frac{x-D}{\sigma^2}
+=
+\frac{\sigma_i^2-\sigma_{i+1}^2}{2}
+s_\sigma(x).
+$$
+
+Because
+
+$$
+s_\sigma(x)
+=
+\frac{D-x}{\sigma^2},
+$$
+
+this moves the particle toward the denoised estimate $D$.
+
+## 8. The proposed expression
+
+The expression
+
+$$
+-\frac{x-D}{\sigma^2}\,d\sigma
+$$
+
+is equal to
+
+$$
+s_\sigma(x)\,d\sigma.
+$$
+
+That uses the score as though it were the derivative with respect to sigma.
+It is not: the correct probability-flow equations are
+
+$$
+\boxed{
+dx=-\sigma s_\sigma(x)\,d\sigma
+}
+$$
+
+or, equivalently,
+
+$$
+\boxed{
+dx=-\frac12s_\sigma(x)\,d(\sigma^2).
+}
+$$
+
+Since $d\sigma<0$ during denoising, the proposed
+$s_\sigma(x)\,d\sigma$ would move opposite to the score. The required
+$-\sigma$ factor both corrects the coordinate scaling and gives the correct
+denoising direction.
+
+## 9. What this means for the guided sampler
+
+The base transport in the current sampler is a valid variance-coordinate
+Euler discretization:
+
+$$
+x_{i+1}
+=
+\hat x_i
++
+\frac{\sigma_{i+1}^2-\hat\sigma_i^2}{2}
+\frac{\hat x_i-D(\hat x_i,\hat\sigma_i)}{\hat\sigma_i^2}.
+$$
+
+The separate concern is the potential-guidance correction added inside
+$D$. That correction was derived for the old sigma-space update and must be
+rederived if the variance-space transport is retained. The base score
+transport itself is consistent with the probability-flow ODE.
+
+## 10. Add reward guidance
+
+The desired tilted marginal is
+
+$$
+\pi_\sigma(x)
+\propto
+q_\sigma(x)
+\exp\left(\beta_\sigma(\sigma)r(x)\right).
+$$
+
+Its score is
+
+$$
+\nabla_x\log\pi_\sigma(x)
+=
+s_\sigma(x)
++
+\beta_\sigma(\sigma)\nabla r(x).
+$$
+
+The reheating operation adds Gaussian variance
+
+$$
+\hat\sigma_i^2-\sigma_i^2.
+$$
+
+The reward-guidance strength is simply
+
+$$
+\boxed{
+\beta_\sigma(\hat\sigma_i)
+(\hat\sigma_i^2-\sigma_i^2).
+}
+$$
+
+The two factors have direct meanings:
+
+- $\beta_\sigma(\hat\sigma_i)$ is the reward strength at the reheated noise
+  level;
+- $\hat\sigma_i^2-\sigma_i^2$ is the variance added by reheating.
+
+There is no additional factor of $\hat\sigma_i$ in the desired particle
+motion. Probability flow contributes a factor of $1/2$, and the scalar
+strength acts in the reward direction $\nabla r(\hat x_i)$. The resulting
+guidance displacement is
+
+$$
+\boxed{
+\delta x_{\mathrm{guidance}}
+=
+\frac12
+\beta_\sigma(\hat\sigma_i)
+(\hat\sigma_i^2-\sigma_i^2)
+\nabla r(\hat x_i).
+}
+$$
+
+The base-score part is already included in the denoising transport from
+$\hat\sigma_i$ to $\sigma_{i+1}$. Thus the clean guided update in
+$\sigma^2$ is
+
+$$
+\boxed{
+\begin{aligned}
+x_{i+1}
+=
+\hat x_i
+&+
+\frac{\hat\sigma_i^2-\sigma_{i+1}^2}{2}
+s_{\hat\sigma_i}(\hat x_i)\\
+&+
+\frac{\hat\sigma_i^2-\sigma_i^2}{2}
+\beta_\sigma(\hat\sigma_i)
+\nabla r(\hat x_i).
+\end{aligned}
+}
+$$
+
+This equation has a direct interpretation:
+
+- the first added term transports the reheated particle toward the base
+  density;
+- the second added term transports it toward high reward;
+- only the reward term uses the variance added by reheating.
+
+### Express this update as a drift
+
+The sampler now has the same shape as a conventional first-order solver:
+
+$$
+x_{i+1}
+=
+\hat x_i
++
+\frac{\sigma_{i+1}^2-\hat\sigma_i^2}{2}
+b_i.
+$$
+
+The callback returns the complete drift $b_i$ with respect to
+$\sigma^2/2$. Matching the clean guided update above gives
+
+$$
+\boxed{
+\begin{aligned}
+b_i
+=
+&-s_{\hat\sigma_i}(\hat x_i)\\
+&-
+\frac{\hat\sigma_i^2-\sigma_i^2}
+{\hat\sigma_i^2-\sigma_{i+1}^2}
+\beta_\sigma(\hat\sigma_i)
+\nabla r(\hat x_i).
+\end{aligned}
+}
+$$
+
+This naturally separates into a score drift and a guidance drift:
+
+$$
+b_i^{\mathrm{score}}
+=
+-s_{\hat\sigma_i}(\hat x_i),
+\qquad
+b_i^{\mathrm{guidance}}
+=
+-
+\frac{\hat\sigma_i^2-\sigma_i^2}
+{\hat\sigma_i^2-\sigma_{i+1}^2}
+\beta_\sigma(\hat\sigma_i)
+\nabla r(\hat x_i).
+$$
+
+Multiplying the guidance drift by the solver step size cancels the full
+transport interval:
+
+$$
+\frac{\sigma_{i+1}^2-\hat\sigma_i^2}{2}
+b_i^{\mathrm{guidance}}
+=
+\frac12
+\beta_\sigma(\hat\sigma_i)
+(\hat\sigma_i^2-\sigma_i^2)
+\nabla r(\hat x_i).
+$$
+
+## 11. Calculate the FKC weights
+
+The tilted target is
+
+$$
+\pi_\sigma(x)
+\propto
+q_\sigma(x)
+\exp\left(\beta_\sigma(\sigma)r(x)\right).
+$$
+
+The proposal moves particles using the guided dynamics from section 10.
+FKC weights correct the remaining change of measure so that the weighted
+particle population represents $\pi_\sigma$.
+
+For the reward used by the test, $r(x)$ has no explicit dependence on
+$\sigma$. The continuous log-weight differential in $\sigma^2$ is
+
+$$
+\boxed{
+d\log w
+=
+r(x)\,d\beta_\sigma
+-
+\frac12
+\beta_\sigma(\sigma)
+\left\langle
+\nabla r(x),
+s_\sigma(x)
+\right\rangle
+d(\sigma^2).
+}
+$$
+
+There are two contributions.
+
+### Change in tilt strength
+
+As the sampler moves from $\sigma_i$ to $\sigma_{i+1}$, the reward tilt
+changes from $\beta_\sigma(\sigma_i)$ to
+$\beta_\sigma(\sigma_{i+1})$. Holding the particle fixed at the reheated
+state gives
+
+$$
+\left[
+\beta_\sigma(\sigma_{i+1})
+-
+\beta_\sigma(\sigma_i)
+\right]
+r(\hat x_i).
+$$
+
+This term increases the relative weight of particles with high reward as
+the target tilt becomes stronger.
+
+### Reward-score alignment
+
+The second term is integrated over the decreasing base variance interval:
+
+$$
+\begin{aligned}
+&-
+\frac12
+\beta_\sigma(\hat\sigma_i)
+\left\langle
+\nabla r(\hat x_i),
+s_{\hat\sigma_i}(\hat x_i)
+\right\rangle
+\left(\sigma_{i+1}^2-\sigma_i^2\right)\\
+&=
+\frac{\sigma_i^2-\sigma_{i+1}^2}{2}
+\beta_\sigma(\hat\sigma_i)
+\left\langle
+\nabla r(\hat x_i),
+s_{\hat\sigma_i}(\hat x_i)
+\right\rangle.
+\end{aligned}
+$$
+
+This measures whether the reward gradient and the base-density score point
+in similar directions:
+
+- a positive inner product increases the log weight;
+- a negative inner product decreases the log weight.
+
+### Complete discrete weight increment
+
+Combining both contributions gives exactly the callback used by the test:
+
+$$
+\boxed{
+\begin{aligned}
+\Delta\log w_i
+=
+&\left[
+\beta_\sigma(\sigma_{i+1})
+-
+\beta_\sigma(\sigma_i)
+\right]
+r(\hat x_i)\\
+&+
+\frac{\sigma_i^2-\sigma_{i+1}^2}{2}
+\beta_\sigma(\hat\sigma_i)
+\left\langle
+\nabla r(\hat x_i),
+s_{\hat\sigma_i}(\hat x_i)
+\right\rangle.
+\end{aligned}
+}
+$$
+
+The implementation is:
+
+```python
+score = gmm.score(x, schedule.time(sigma_hat))
+
+potential = (
+    beta_sigma(sigma_next) - beta_sigma(sigma_curr)
+) * reward(x)
+
+alignment = (
+    beta_sigma(sigma_hat)
+    * grad_reward(x)
+    * score
+    * (sigma_curr**2 - sigma_next**2)
+    / 2.0
+)
+
+delta_log_weight = potential + alignment
+```
+
+The callback is evaluated at the reheated state $\hat x_i$, but the
+alignment term uses the base variance difference
+
+$$
+\sigma_i^2-\sigma_{i+1}^2.
+$$
+
+It does not use
+
+$$
+\hat\sigma_i^2-\sigma_{i+1}^2,
+$$
+
+because reheating is an auxiliary proposal operation. It changes the state
+at which the FKC increment is evaluated, but the weight differential still
+belongs to the base progression from $\sigma_i$ to $\sigma_{i+1}$.
+
+### Accumulate and normalize
+
+The sampler accumulates the increments in log space:
+
+$$
+\log w
+\leftarrow
+\log w+\Delta\log w_i.
+$$
+
+The normalized weights are
+
+$$
+\widetilde w
+=
+\operatorname{softmax}(\log w).
+$$
+
+The normalized effective sample size is
+
+$$
+\frac{\operatorname{ESS}}{N}
+=
+\frac{1}
+{N\lVert\widetilde w\rVert_2^2}.
+$$
+
+If ESS becomes too small, systematic resampling converts the nonuniform
+weights into particle multiplicities and resets the log weights to zero.
+Between resampling events, the **weighted** particle population, rather than
+the unweighted histogram, is the approximation of the tilted target.
+
 
 Sources: Skreta et al., *Feynman-Kac Correctors in Diffusion* (ICML 2025,
 arXiv:2503.02819); Karras et al., *Elucidating the Design Space of

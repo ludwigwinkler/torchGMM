@@ -11,6 +11,52 @@ PLOT = True
 PLOT_DIR = Path(__file__).parent / "plots"
 
 
+def plot_edm_sampling_diagnostics(
+    trajectory,
+    sigma,
+    ess_history,
+    beta_sigma,
+    reward_center,
+    title,
+    out_path,
+    n_trajectories=200,
+    alpha=0.08,
+):
+    """Save vertically stacked particle-trajectory, ESS, and tilt-schedule diagnostics."""
+    import matplotlib.pyplot as plt
+
+    n_particles = trajectory.shape[1]
+    n_plot = min(n_trajectories, n_particles)
+    idx_plot = torch.linspace(0, n_particles - 1, n_plot, dtype=torch.long, device=trajectory.device)
+    ess = torch.as_tensor(ess_history, dtype=sigma.dtype, device=sigma.device)
+    beta = beta_sigma(sigma).detach()
+
+    fig, axes = plt.subplots(3, 1, figsize=(9, 11), sharex=True)
+    axes[0].plot(sigma.cpu(), trajectory[:, idx_plot, 0, 0].cpu(), color="darkorange", alpha=alpha, linewidth=0.7)
+    axes[0].axhline(reward_center, color="firebrick", linestyle="--", linewidth=1.2, label="reward center")
+    axes[0].set_ylabel(r"$x_\sigma$")
+    axes[0].set_title(title)
+    axes[0].legend(fontsize=9)
+
+    axes[1].plot(sigma[:-1].cpu(), ess.cpu(), color="darkorange", linewidth=1.2)
+    axes[1].set_ylabel("ESS / N")
+    axes[1].set_ylim(0, 1.05)
+
+    axes[2].plot(sigma.cpu(), beta.cpu(), color="firebrick", linewidth=1.5)
+    axes[2].set_xlabel(r"$\sigma$")
+    axes[2].set_ylabel(r"$\beta_\sigma(\sigma)$")
+
+    for ax in axes:
+        ax.set_xscale("log")
+        ax.set_xlim(sigma[0].item(), sigma[-1].item())
+    fig.tight_layout()
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _reward(x: torch.Tensor, sigma: torch.Tensor, center: float = 0.3) -> torch.Tensor:
     return -0.5 * (x - center).square()
 
@@ -127,12 +173,12 @@ class TestSteeredReverseEdmSamplingContract:
         x0 = torch.tensor([[1.0], [2.0]])
         sigma = torch.tensor([10.0, 4.0, 2.0, 0.5])
         callback_levels = []
-        denoise_states = []
+        drift_states = []
         weight_states = []
 
-        def denoise(x, sigma_hat, sigma_curr, sigma_next):
-            denoise_states.append(x.clone())
-            return torch.zeros_like(x)
+        def drift(x, sigma_hat, sigma_curr, sigma_next):
+            drift_states.append(x.clone())
+            return x / sigma_hat.square()
 
         def weight_update(x, sigma_hat, sigma_curr, sigma_next):
             weight_states.append(x.clone())
@@ -143,7 +189,7 @@ class TestSteeredReverseEdmSamplingContract:
         noise = torch.randn_like(x0)
         torch.manual_seed(7)
         trajectory, _, weight_history = steered_reverse_edm_sampling(
-            denoise=denoise,
+            drift=drift,
             weight_update=weight_update,
             x=x0,
             sigma=sigma,
@@ -151,11 +197,13 @@ class TestSteeredReverseEdmSamplingContract:
         )
 
         torch.testing.assert_close(trajectory[0], x0)
-        torch.testing.assert_close(trajectory[1], 0.4 * x0)
+        first_step_scale = 1.0 + (sigma[1].square() - sigma[0].square()) / (2.0 * sigma[0].square())
+        torch.testing.assert_close(trajectory[1], first_step_scale * x0)
         x_noisy = trajectory[1] + math.sqrt(10.0**2 - 4.0**2) * noise
-        torch.testing.assert_close(denoise_states[1], x_noisy)
+        torch.testing.assert_close(drift_states[1], x_noisy)
         torch.testing.assert_close(weight_states[1], x_noisy)
-        torch.testing.assert_close(trajectory[2], 0.2 * x_noisy)
+        second_step_scale = 1.0 + (sigma[2].square() - sigma[0].square()) / (2.0 * sigma[0].square())
+        torch.testing.assert_close(trajectory[2], second_step_scale * x_noisy)
         torch.testing.assert_close(weight_history[1], torch.softmax(torch.tensor([1.0, -1.0]), dim=0))
         assert callback_levels[0] == (10.0, 10.0, 4.0)
         assert callback_levels[1] == (10.0, 4.0, 2.0)
@@ -166,7 +214,7 @@ class TestSteeredReverseEdmSamplingContract:
         sigma = torch.tensor([3.0, 2.0, 1.0])
 
         trajectory, _, _ = steered_reverse_edm_sampling(
-            denoise=lambda x, sigma_hat, sigma_curr, sigma_next: torch.zeros_like(x),
+            drift=lambda x, sigma_hat, sigma_curr, sigma_next: x / sigma_hat.square(),
             weight_update=lambda x, sigma_hat, sigma_curr, sigma_next: torch.zeros(x.shape[0]),
             x=x0,
             sigma=sigma,
@@ -175,12 +223,13 @@ class TestSteeredReverseEdmSamplingContract:
             ess_threshold=1_000,
         )
 
-        torch.testing.assert_close(trajectory[1], x0 * (2.0 / 3.0))
+        first_step_scale = 1.0 + (sigma[1].square() - sigma[0].square()) / (2.0 * sigma[0].square())
+        torch.testing.assert_close(trajectory[1], first_step_scale * x0)
 
     def test_rejects_non_decreasing_sigma(self):
         with pytest.raises(ValueError, match="strictly decreasing"):
             steered_reverse_edm_sampling(
-                denoise=lambda x, sigma_hat, sigma_curr, sigma_next: torch.zeros_like(x),
+                drift=lambda x, sigma_hat, sigma_curr, sigma_next: torch.zeros_like(x),
                 weight_update=lambda x, sigma_hat, sigma_curr, sigma_next: torch.zeros(x.shape[0]),
                 x=torch.zeros(3, 1),
                 sigma=torch.tensor([1.0, 2.0]),
@@ -190,7 +239,7 @@ class TestSteeredReverseEdmSamplingContract:
 @pytest.mark.slow
 class TestSteeredReverseEdmSamplingMarginals:
     N_PARTICLES = 20_000
-    N_STEPS = 500
+    N_STEPS = 1000
 
     @pytest.fixture
     def setup(self):
@@ -206,8 +255,8 @@ class TestSteeredReverseEdmSamplingMarginals:
     def test_zero_potential_matches_base_gmm(self, setup):
         gmm, schedule = setup
 
-        def denoise(x, sigma_hat, sigma_curr, sigma_next):
-            return x + sigma_hat.square() * gmm.score(x, schedule.time(sigma_hat))
+        def drift(x, sigma_hat, sigma_curr, sigma_next):
+            return -gmm.score(x, schedule.time(sigma_hat))
 
         def zero_weight_update(x, sigma_hat, sigma_curr, sigma_next):
             return torch.zeros(x.shape[0], dtype=x.dtype, device=x.device)
@@ -217,8 +266,8 @@ class TestSteeredReverseEdmSamplingMarginals:
         torch.manual_seed(0)
         x0 = gmm.sample(shape=self.N_PARTICLES, t=torch.tensor(1.0))
         torch.manual_seed(1)
-        trajectory, _, weight_history = steered_reverse_edm_sampling(
-            denoise=denoise,
+        trajectory, ess_history, weight_history = steered_reverse_edm_sampling(
+            drift=drift,
             weight_update=zero_weight_update,
             x=x0,
             sigma=sigma,
@@ -229,6 +278,22 @@ class TestSteeredReverseEdmSamplingMarginals:
 
         plot_sigma_indices = torch.linspace(0, self.N_STEPS - 1, 11, dtype=torch.int64).tolist()
         if PLOT:
+            plot_edm_sampling_diagnostics(
+                trajectory=trajectory,
+                sigma=sigma,
+                ess_history=ess_history,
+                beta_sigma=torch.zeros_like,
+                reward_center=0.0,
+                title="EDM sigma-space zero potential | KarrasSchedule",
+                out_path=(
+                    PLOT_DIR.joinpath(
+                        "test_edm_sigma_steering",
+                        "TestSteeredReverseEdmSamplingMarginals",
+                        "test_zero_potential_matches_base_gmm",
+                    )
+                    / "diagnostics.png"
+                ),
+            )
             for sigma_idx in plot_sigma_indices:
                 sigma_i = sigma[sigma_idx]
                 t = schedule.time(sigma_i)
@@ -285,34 +350,35 @@ class TestSteeredReverseEdmSamplingMarginals:
             return -(x - reward_center) / reward_sigma**2
 
         def beta_sigma(sigma):
-            return (1.0 - schedule.time(sigma)) / (1 + 0.1 * sigma**2)
+            return (1.0 - schedule.time(sigma))**4 / (1 + 0.1 * sigma**2)
 
-        def denoise(x, sigma_hat, sigma_curr, sigma_next):
+        def drift(x, sigma_hat, sigma_curr, sigma_next):
             t = schedule.time(sigma_hat)
-            denoised = x + sigma_hat.square() * gmm.score(x, t)
-            reheat_variance = sigma_hat.square() - sigma_curr.square()
-            guidance = (
-                sigma_hat * beta_sigma(sigma_hat) * grad_reward(x) * reheat_variance / (2.0 * (sigma_hat - sigma_next))
+            score_drift = -gmm.score(x, t)
+            reheat_variance = sigma_hat**2 - sigma_curr**2
+            guidance_drift = (
+                -beta_sigma(sigma_hat) * reheat_variance  * grad_reward(x)
             )
-            return denoised + guidance
+            guidance_drift /= sigma_hat**2 - sigma_next**2
+            return score_drift + guidance_drift
 
         def weight_update(x, sigma_hat, sigma_curr, sigma_next):
             t = schedule.time(sigma_hat)
             score = gmm.score(x, t)
-            delta = sigma_curr.square() - sigma_next.square()
+            dsigma = sigma_curr**2 - sigma_next**2
             potential = (beta_sigma(sigma_next) - beta_sigma(sigma_curr)) * reward(x)
-            alignment = beta_sigma(sigma_hat) * grad_reward(x) * score * delta / 2.0
+            alignment = beta_sigma(sigma_hat) * grad_reward(x) * score * dsigma / 2.0
             return (potential + alignment).squeeze(-1).squeeze(-1)
 
         tau = torch.linspace(0.0, 1.0, self.N_STEPS)
         sigma = schedule.get_sigma_t(1.0 - tau)
         torch.manual_seed(0)
-        x0 = gmm.sample(shape=self.N_PARTICLES, t=torch.tensor(1.0))
+        xT = gmm.sample(shape=self.N_PARTICLES, t=torch.tensor(1.0))
         torch.manual_seed(1)
-        trajectory, _, weight_history = steered_reverse_edm_sampling(
-            denoise=denoise,
+        trajectory, ess_history, weight_history = steered_reverse_edm_sampling(
+            drift=drift,
             weight_update=weight_update,
-            x=x0,
+            x=xT,
             sigma=sigma,
             noise_scale=1.0,
             step_scale=1.0,
@@ -324,6 +390,24 @@ class TestSteeredReverseEdmSamplingMarginals:
 
         plot_sigma_indices = torch.linspace(0, self.N_STEPS - 1, 11, dtype=torch.int64).tolist()
         if PLOT:
+            plot_edm_sampling_diagnostics(
+                trajectory=trajectory,
+                sigma=sigma,
+                ess_history=ess_history,
+                beta_sigma=beta_sigma,
+                reward_center=reward_center,
+                title=(f"EDM sigma-space FKC | KarrasSchedule\ness={ess_threshold}, center={reward_center}"),
+                out_path=(
+                    PLOT_DIR.joinpath(
+                        "test_edm_sigma_steering",
+                        "TestSteeredReverseEdmSamplingMarginals",
+                        "test_weighted_intermediate_marginals",
+                        f"ess{ess_threshold}",
+                        f"center{reward_center}",
+                    )
+                    / "diagnostics.png"
+                ),
+            )
             for sigma_idx in plot_sigma_indices:
                 sigma_i = sigma[sigma_idx]
                 t = schedule.time(sigma_i)

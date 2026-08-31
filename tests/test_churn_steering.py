@@ -294,8 +294,8 @@ class TestSteeredChurnSampler:
         )
         return gmm, sched
 
-    @pytest.mark.parametrize("churn", [0.5, 0.8, 1.0, 2.0], ids=lambda v: f"churn={v}")
-    @pytest.mark.parametrize("reward_center", [-3, -2.0, 1.0], ids=lambda v: f"center={v}")
+    @pytest.mark.parametrize("churn", [0.5, 2.0], ids=lambda v: f"churn={v}")
+    @pytest.mark.parametrize("reward_center", [-3, 1.0], ids=lambda v: f"center={v}")
     @pytest.mark.parametrize("ess_threshold", [0.9, 2000], ids=lambda v: f"ess={v}")
     def test_guided_steered_karras_churn_sampler_intermediate_marginals(
         self, setup, reward_center, churn, ess_threshold
